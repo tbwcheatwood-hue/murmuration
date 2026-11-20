@@ -1,0 +1,8 @@
+{
+  "id": "prometheus-exporter",
+  "name": "Prometheus Telemetry Exporter",
+  "version": "0.1.0",
+  "description": "Exposes the combined VRAM pool as a Prometheus text scrape. The desktop gateway serves the same series on /metrics.",
+  "permissions": ["telemetry", "network"],
+  "entry": "builtin"
+}

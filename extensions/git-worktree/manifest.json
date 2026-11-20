@@ -1,0 +1,8 @@
+{
+  "id": "git-worktree",
+  "name": "Git Worktree Auto-Committer",
+  "version": "0.1.0",
+  "description": "Writes the swarm artifact onto an isolated local branch. Nothing is committed until you confirm.",
+  "permissions": ["filesystem"],
+  "entry": "builtin"
+}

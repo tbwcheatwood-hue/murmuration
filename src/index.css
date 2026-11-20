@@ -1,0 +1,74 @@
+@import "tailwindcss";
+
+@theme {
+  --color-canvas: #0b0d11;
+  --color-panel: #13161e;
+  --color-panel-2: #171b24;
+  --color-line: #1e2330;
+  --color-line-2: #2a3142;
+  --color-ink: #e7ecf5;
+  --color-mute: #8b95a8;
+  --color-faint: #5c6678;
+  --color-accent: #8ab4ff;
+  --color-mint: #7ee0c6;
+  --color-warn: #e6b35a;
+  --color-danger: #f07178;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #0b0d11;
+  color: #e7ecf5;
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  letter-spacing: -0.011em;
+  overflow: hidden;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a3142;
+  border-radius: 99px;
+  border: 2px solid #0b0d11;
+}
+
+.react-flow__controls-button {
+  background: #13161e !important;
+  border-bottom-color: #1e2330 !important;
+  fill: #e7ecf5 !important;
+}
+
+.react-flow__minimap {
+  background: #13161e !important;
+}
+
+.led {
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  box-shadow: 0 0 8px currentColor;
+}
