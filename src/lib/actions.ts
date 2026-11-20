@@ -84,6 +84,11 @@ export async function injectLoad(): Promise<Snapshot> {
   return call("inject_load");
 }
 
+export async function setNodeHardware(nodeId: string, vramGb: number, ramGb: number, cpu: string, gpu: string): Promise<Snapshot> {
+  if (!inTauri()) return browser.setHardware(nodeId, vramGb, ramGb, cpu, gpu);
+  return call("set_node_hardware", { nodeId, vramGb, ramGb, cpu, gpu });
+}
+
 export async function setNodeStatus(nodeId: string, status: string): Promise<Snapshot> {
   if (!inTauri()) return browser.setStatus(nodeId, status);
   return call("set_node_status", { nodeId, status });

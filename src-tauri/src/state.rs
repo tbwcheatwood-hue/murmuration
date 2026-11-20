@@ -58,6 +58,13 @@ pub struct SwarmNode {
     pub upstream_alive: bool,
     pub gpus: Vec<GpuMetric>,
     pub unified_memory_gb: Option<f64>,
+    pub configured_vram_gb: f64,
+    pub inferred_vram_gb: f64,
+    pub effective_vram_gb: f64,
+    pub vram_source: String,
+    pub ram_gb: f64,
+    pub cpu_name: String,
+    pub gpu_name: String,
     pub tokens_per_sec: f64,
     pub thermal: String,
     pub role: Option<String>,
@@ -456,6 +463,13 @@ fn node(
         upstream_alive: false,
         gpus,
         unified_memory_gb: unified,
+        configured_vram_gb: 0.0,
+        inferred_vram_gb: 0.0,
+        effective_vram_gb: 0.0,
+        vram_source: "none".into(),
+        ram_gb: 0.0,
+        cpu_name: String::new(),
+        gpu_name: String::new(),
         tokens_per_sec: tokens,
         thermal: "warm".into(),
         role: Some(role.into()),
@@ -488,6 +502,13 @@ fn demo_nodes() -> Vec<SwarmNode> {
             upstream_alive: false,
             gpus: Vec::new(),
             unified_memory_gb: None,
+            configured_vram_gb: 0.0,
+            inferred_vram_gb: 0.0,
+            effective_vram_gb: 0.0,
+            vram_source: "none".into(),
+            ram_gb: 0.0,
+            cpu_name: String::new(),
+            gpu_name: String::new(),
             tokens_per_sec: 0.0,
             thermal: "cool".into(),
             role: Some("standby".into()),
@@ -681,10 +702,238 @@ fn demo_blueprints() -> Vec<Blueprint> {
     ]
 }
 
+#[cfg(test)]
+pub fn bare_node(id: &str, hostname: &str) -> SwarmNode {
+    SwarmNode {
+        id: id.into(),
+        hostname: hostname.into(),
+        tailscale_ip: String::new(),
+        os: "LM Link".into(),
+        ping_ms: 0,
+        relay: "lm-link".into(),
+        derp_region: None,
+        lm_link_bound: true,
+        lm_link_port: Some(1234),
+        upstream_alive: false,
+        gpus: Vec::new(),
+        unified_memory_gb: None,
+        configured_vram_gb: 0.0,
+        inferred_vram_gb: 0.0,
+        effective_vram_gb: 0.0,
+        vram_source: "none".into(),
+        ram_gb: 0.0,
+        cpu_name: String::new(),
+        gpu_name: String::new(),
+        tokens_per_sec: 0.0,
+        thermal: "cool".into(),
+        role: Some("standby".into()),
+        simulated: false,
+        status: "online".into(),
+        throughput_mbps: 0.0,
+        color: "#8AB4FF".into(),
+        last_seen: now_iso(),
+        ping_base: 0,
+        util_base: 0.0,
+        token_base: 0.0,
+        announced_down: false,
+        ping_misses: 0,
+    }
+}
+
 pub fn node_vram(node: &SwarmNode) -> (f64, f64) {
     let total = node.gpus.iter().map(|gpu| gpu.vram_total_gb).sum();
     let allocated = node.gpus.iter().map(|gpu| gpu.vram_allocated_gb).sum();
     (total, allocated)
+}
+
+/// Measured hardware wins. A manifest override is next. A model footprint is the floor.
+/// The second value is the tier (3 measured, 2 configured, 1 inferred) so equal sizes keep the measured node ahead.
+pub fn vram_rank(node: &SwarmNode) -> (f64, u8) {
+    let measured = node_vram(node).0;
+    if measured > 0.0 {
+        return (measured, 3);
+    }
+    if node.configured_vram_gb > 0.0 {
+        return (node.configured_vram_gb, 2);
+    }
+    if node.inferred_vram_gb > 0.0 {
+        return (node.inferred_vram_gb, 1);
+    }
+    (0.0, 0)
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareEntry {
+    pub hostname: String,
+    pub vram_gb: f64,
+    pub ram_gb: f64,
+    pub cpu: String,
+    pub gpu: String,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct HardwareFile {
+    nodes: Vec<HardwareEntry>,
+}
+
+#[allow(dead_code)]
+pub fn hardware_matches(node: &SwarmNode, query: &str) -> bool {
+    let query = query.trim().to_ascii_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    let (measured, _) = node_vram(node);
+    let blob = format!(
+        "{} {} {} {} {} {} {} {} {} {} {}",
+        node.hostname,
+        node.status,
+        node.role.as_deref().unwrap_or(""),
+        node.cpu_name,
+        node.gpu_name,
+        node.gpus.iter().map(|gpu| gpu.name.as_str()).collect::<Vec<_>>().join(" "),
+        node.vram_source,
+        trim_num(node.ram_gb),
+        trim_num(node.configured_vram_gb),
+        trim_num(node.effective_vram_gb),
+        trim_num(measured),
+    )
+    .to_ascii_lowercase();
+    query.split_whitespace().all(|part| blob.contains(part))
+}
+
+#[allow(dead_code)]
+fn trim_num(value: f64) -> String {
+    if value <= 0.0 {
+        return String::new();
+    }
+    if (value - value.round()).abs() < 0.05 {
+        format!("{:.0}", value.round())
+    } else {
+        format!("{value:.1}")
+    }
+}
+
+pub fn assign_hardware(node: &mut SwarmNode, entry: &HardwareEntry) {
+    node.configured_vram_gb = entry.vram_gb.max(0.0);
+    node.ram_gb = entry.ram_gb.max(0.0);
+    node.cpu_name = entry.cpu.trim().to_string();
+    node.gpu_name = entry.gpu.trim().to_string();
+    refresh_vram_fields(node);
+}
+
+pub fn hardware_file_path() -> std::path::PathBuf {
+    if let Ok(custom) = std::env::var("MURMURATION_HARDWARE_FILE") {
+        return std::path::PathBuf::from(custom);
+    }
+    let base = std::env::var("LOCALAPPDATA")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(base).join("Murmuration").join("hardware.json")
+}
+
+pub fn load_hardware_entries(path: &std::path::Path) -> Vec<HardwareEntry> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    serde_json::from_str::<HardwareFile>(&text).map(|file| file.nodes).unwrap_or_default()
+}
+
+pub fn save_hardware_entries(path: &std::path::Path, entries: &[HardwareEntry]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let body = serde_json::to_string_pretty(&HardwareFile { nodes: entries.to_vec() }).map_err(|err| err.to_string())?;
+    std::fs::write(path, body).map_err(|err| err.to_string())
+}
+
+pub fn upsert_hardware(path: &std::path::Path, entry: HardwareEntry) -> Result<(), String> {
+    let mut entries = load_hardware_entries(path);
+    if let Some(existing) = entries.iter_mut().find(|item| item.hostname.eq_ignore_ascii_case(&entry.hostname)) {
+        *existing = entry;
+    } else {
+        entries.push(entry);
+    }
+    save_hardware_entries(path, &entries)
+}
+
+pub fn apply_saved_hardware(state: &mut AppState) {
+    let entries = load_hardware_entries(&hardware_file_path());
+    for node in &mut state.nodes {
+        if let Some(entry) = entries.iter().find(|item| item.hostname.eq_ignore_ascii_case(&node.hostname)) {
+            assign_hardware(node, entry);
+        }
+    }
+}
+
+pub fn refresh_vram_fields(node: &mut SwarmNode) {
+    let (gb, tier) = vram_rank(node);
+    node.effective_vram_gb = gb;
+    node.vram_source = match tier {
+        3 => "measured",
+        2 => "configured",
+        1 => "inferred",
+        _ => "none",
+    }
+    .into();
+}
+
+#[cfg(test)]
+mod hardware_tests {
+    use super::*;
+
+    #[test]
+    fn search_matches_cpu_gpu_ram_and_vram() {
+        let mut node = bare_node("local", "FamilyRoom");
+        assign_hardware(
+            &mut node,
+            &HardwareEntry {
+                hostname: "FamilyRoom".into(),
+                vram_gb: 24.0,
+                ram_gb: 64.0,
+                cpu: "Ryzen 9 7950X".into(),
+                gpu: "RTX 4090".into(),
+            },
+        );
+        assert!(hardware_matches(&node, "4090"));
+        assert!(hardware_matches(&node, "ryzen 64"));
+        assert!(hardware_matches(&node, "24"));
+        assert!(!hardware_matches(&node, "intel"));
+        assert_eq!(node.vram_source, "configured");
+        assert!((node.effective_vram_gb - 24.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn saved_hardware_roundtrips_and_applies_by_hostname() {
+        let path = std::env::temp_dir().join(format!("murmuration-hardware-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        upsert_hardware(
+            &path,
+            HardwareEntry {
+                hostname: "GamingPC".into(),
+                vram_gb: 16.0,
+                ram_gb: 32.0,
+                cpu: "i7".into(),
+                gpu: "RTX 4080".into(),
+            },
+        )
+        .unwrap();
+        let mut state = AppState::boot();
+        state.nodes.push(bare_node("lm-game", "GamingPC"));
+        let entries = load_hardware_entries(&path);
+        for node in &mut state.nodes {
+            if let Some(entry) = entries.iter().find(|item| item.hostname.eq_ignore_ascii_case(&node.hostname)) {
+                assign_hardware(node, entry);
+            }
+        }
+        let node = &state.nodes[0];
+        assert_eq!(node.cpu_name, "i7");
+        assert_eq!(node.gpu_name, "RTX 4080");
+        assert!((node.ram_gb - 32.0).abs() < 0.01);
+        assert!(hardware_matches(node, "4080 32"));
+        let _ = std::fs::remove_file(&path);
+    }
 }
 
 pub fn hostname_for(state: &AppState, id: &str) -> String {

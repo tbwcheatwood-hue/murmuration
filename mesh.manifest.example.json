@@ -1,0 +1,9 @@
+{
+  "telemetryPort": 9471,
+  "nodes": [
+    {
+      "hostname": "GamingPC",
+      "telemetryHost": "192.168.1.20"
+    }
+  ]
+}

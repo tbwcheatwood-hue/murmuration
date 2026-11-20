@@ -304,6 +304,31 @@ export const browser = {
       log(snapshot, "gateway", "telemetry", "warn", "Stress load injected. Thermal failover can trip if a node crosses 93%.");
     });
   },
+  setHardware(nodeId: string, vramGb: number, ramGb: number, cpu: string, gpu: string): Snapshot {
+    return mutate((snapshot) => {
+      const node = snapshot.nodes.find((item) => item.id === nodeId);
+      if (!node) return;
+      node.configuredVramGb = Math.max(0, vramGb);
+      node.ramGb = Math.max(0, ramGb);
+      node.cpuName = cpu.trim();
+      node.gpuName = gpu.trim();
+      const measured = node.gpus.reduce((sum, gpuMetric) => sum + gpuMetric.vramTotalGb, 0);
+      if (measured > 0) {
+        node.effectiveVramGb = measured;
+        node.vramSource = "measured";
+      } else if (node.configuredVramGb > 0) {
+        node.effectiveVramGb = node.configuredVramGb;
+        node.vramSource = "configured";
+      } else if (node.inferredVramGb > 0) {
+        node.effectiveVramGb = node.inferredVramGb;
+        node.vramSource = "inferred";
+      } else {
+        node.effectiveVramGb = 0;
+        node.vramSource = "none";
+      }
+      log(snapshot, node.id, "telemetry", "info", `${node.hostname} hardware values saved.`);
+    });
+  },
   setStatus(nodeId: string, status: string): Snapshot {
     return mutate((snapshot) => {
       const node = snapshot.nodes.find((item) => item.id === nodeId);
@@ -342,12 +367,25 @@ export const browser = {
   },
 };
 
+function capacityOf(node: SwarmNode) {
+  const measured = vramOf(node).total;
+  if (measured > 0) return { gb: measured, tier: 3 };
+  if (node.configuredVramGb > 0) return { gb: node.configuredVramGb, tier: 2 };
+  if (node.inferredVramGb > 0) return { gb: node.inferredVramGb, tier: 1 };
+  return { gb: 0, tier: 0 };
+}
+
 function rebalance(snapshot: Snapshot) {
   const blueprint = snapshot.blueprints.find((item) => item.id === snapshot.activeBlueprintId);
   if (!blueprint) return;
+  for (const node of snapshot.nodes) {
+    const capacity = capacityOf(node);
+    node.effectiveVramGb = capacity.gb;
+    node.vramSource = capacity.tier === 3 ? "measured" : capacity.tier === 2 ? "configured" : capacity.tier === 1 ? "inferred" : "none";
+  }
   const ranked = snapshot.nodes
-    .filter((node) => healthy(node) && vramOf(node).total > 0)
-    .sort((a, b) => vramOf(b).total - vramOf(a).total || a.hostname.localeCompare(b.hostname));
+    .filter((node) => healthy(node) && capacityOf(node).gb > 0)
+    .sort((a, b) => capacityOf(b).gb - capacityOf(a).gb || capacityOf(b).tier - capacityOf(a).tier || a.hostname.localeCompare(b.hostname));
   for (const node of snapshot.nodes) {
     if (healthy(node)) node.role = "standby";
   }

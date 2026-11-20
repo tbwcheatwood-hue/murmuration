@@ -18,6 +18,7 @@ pub struct Probe {
     pub notes: Vec<Note>,
     pub lm_link: Option<LmNetwork>,
     pub link_error: Option<String>,
+    pub local_inferred_gb: f64,
 }
 
 #[derive(Clone)]
@@ -136,7 +137,7 @@ pub fn probe() -> Probe {
             node_id: "local".into(),
             source: "telemetry".into(),
             level: "info".into(),
-            message: "nvidia-smi is not available on this host. Local VRAM stays unknown until a probe succeeds.".into(),
+            message: "nvidia-smi is not available (PATH, System32, and NVSMI were checked). Local measured VRAM stays 0 until a probe or sidecar succeeds.".into(),
         });
         (None, None)
     };
@@ -193,6 +194,7 @@ pub fn probe() -> Probe {
         notes,
         lm_link,
         link_error,
+        local_inferred_gb: inferred_from_lms_ps(),
     }
 }
 
@@ -244,26 +246,50 @@ pub fn apply(state: &mut AppState, probe: Probe) {
     }
     state.models.retain(|model| !model.simulated);
 
+    let file_floor = state
+        .models
+        .iter()
+        .filter(|model| !model.simulated)
+        .map(|model| model.size_gb)
+        .fold(0.0_f64, f64::max);
+    apply_capacity(state, probe.local_inferred_gb, file_floor);
+
     for note in probe.notes {
         state.log(&note.node_id, &note.source, &note.level, note.message);
     }
 }
 
 pub fn sample_nvidia() -> Option<NvidiaSample> {
-    let raw = capture(
-        "nvidia-smi",
-        &[
-            "--query-gpu=name,memory.total,memory.used,utilization.gpu,temperature.gpu",
-            "--format=csv,noheader,nounits",
-        ],
-        Duration::from_millis(1200),
-    )?;
-    let parsed = parse_nvidia_csv(&raw);
-    if parsed.gpus.is_empty() {
-        None
-    } else {
-        Some(parsed)
+    let query = [
+        "--query-gpu=name,memory.total,memory.free,utilization.gpu,temperature.gpu",
+        "--format=csv,noheader,nounits",
+    ];
+    for program in nvidia_smi_candidates() {
+        if program.contains('\\') || program.contains('/') {
+            if !Path::new(&program).exists() {
+                continue;
+            }
+        }
+        if let Some(raw) = capture(&program, &query, Duration::from_millis(1200)) {
+            let parsed = parse_nvidia_csv(&raw);
+            if !parsed.gpus.is_empty() {
+                return Some(parsed);
+            }
+        }
     }
+    None
+}
+
+pub fn nvidia_smi_candidates() -> Vec<String> {
+    let mut paths = vec!["nvidia-smi".to_string()];
+    if cfg!(windows) {
+        paths.push(r"C:\Windows\System32\nvidia-smi.exe".into());
+        paths.push(r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe".into());
+    } else {
+        paths.push("/usr/bin/nvidia-smi".into());
+        paths.push("/usr/local/nvidia/bin/nvidia-smi".into());
+    }
+    paths
 }
 
 pub fn ping_ms(ip: &str) -> Option<u32> {
@@ -336,6 +362,13 @@ pub fn parse_tailscale(raw: &str) -> Result<ParsedTailscale, String> {
                 upstream_alive: false,
                 gpus: Vec::new(),
                 unified_memory_gb: None,
+                configured_vram_gb: 0.0,
+                inferred_vram_gb: 0.0,
+                effective_vram_gb: 0.0,
+                vram_source: "none".into(),
+                ram_gb: 0.0,
+                cpu_name: String::new(),
+                gpu_name: String::new(),
                 tokens_per_sec: 0.0,
                 thermal: "cool".into(),
                 role: Some("standby".into()),
@@ -377,7 +410,7 @@ pub fn parse_nvidia_csv(text: &str) -> NvidiaSample {
             continue;
         }
         let total_mib: f64 = parts[1].parse().unwrap_or(0.0);
-        let used_mib: f64 = parts[2].parse().unwrap_or(0.0);
+        let free_mib: f64 = parts[2].parse().unwrap_or(0.0);
         let util: f64 = parts[3].parse().unwrap_or(0.0);
         if total_mib <= 0.0 {
             continue;
@@ -387,6 +420,7 @@ pub fn parse_nvidia_csv(text: &str) -> NvidiaSample {
                 temp_c = Some(temp);
             }
         }
+        let used_mib = (total_mib - free_mib).max(0.0);
         gpus.push(GpuMetric {
             name: parts[0].to_string(),
             vram_total_gb: round1(total_mib / 1024.0),
@@ -605,6 +639,7 @@ pub struct LmDevice {
     pub name: String,
     pub status: String,
     pub loaded: Vec<String>,
+    pub loaded_bytes: u64,
 }
 
 #[derive(Clone)]
@@ -660,6 +695,7 @@ pub fn parse_lm_link(raw: &str) -> Result<LmNetwork, String> {
             name,
             status: link_status,
             loaded: Vec::new(),
+            loaded_bytes: 0,
         },
         peers,
         preferred_id: status.preferred_device_identifier.unwrap_or_default(),
@@ -672,12 +708,43 @@ fn device_from(identifier: Option<String>, name: Option<String>, status: Option<
     if identifier.is_empty() || name.is_empty() {
         return None;
     }
+    let models = loaded.unwrap_or_default();
+    let loaded_bytes = models.iter().map(model_bytes).sum();
     Some(LmDevice {
         identifier,
         name,
         status: status.unwrap_or_else(|| "unknown".into()),
-        loaded: loaded.unwrap_or_default().iter().filter_map(model_label).collect(),
+        loaded: models.iter().filter_map(model_label).collect(),
+        loaded_bytes,
     })
+}
+
+fn model_bytes(value: &Value) -> u64 {
+    let Some(object) = value.as_object() else {
+        return 0;
+    };
+    for key in ["sizeBytes", "size_bytes", "fileSize"] {
+        if let Some(bytes) = object.get(key).and_then(Value::as_u64) {
+            return bytes;
+        }
+        if let Some(bytes) = object.get(key).and_then(Value::as_f64) {
+            if bytes > 0.0 {
+                return bytes as u64;
+            }
+        }
+    }
+    0
+}
+
+fn inferred_gb_from_loaded(device: &LmDevice) -> f64 {
+    if device.loaded_bytes > 0 {
+        return round1(device.loaded_bytes as f64 / 1_000_000_000.0);
+    }
+    if device.loaded.is_empty() {
+        0.0
+    } else {
+        device.loaded.len() as f64
+    }
 }
 
 fn model_label(value: &Value) -> Option<String> {
@@ -733,6 +800,10 @@ fn take_device(existing: &[SwarmNode], used: &mut [bool], device: &LmDevice, is_
     node.simulated = false;
     node.relay = "lm-link".into();
     node.role = link_role(device, is_self, preferred_id);
+    let from_models = inferred_gb_from_loaded(device);
+    if from_models > node.inferred_vram_gb {
+        node.inferred_vram_gb = from_models;
+    }
     node.upstream_alive = node.upstream_alive || (is_self && link_is_up(&device.status));
     node.last_seen = now_iso();
     node
@@ -752,6 +823,13 @@ fn blank_link_node(id: &str, color_index: usize) -> SwarmNode {
         upstream_alive: false,
         gpus: Vec::new(),
         unified_memory_gb: None,
+        configured_vram_gb: 0.0,
+        inferred_vram_gb: 0.0,
+        effective_vram_gb: 0.0,
+        vram_source: "none".into(),
+        ram_gb: 0.0,
+        cpu_name: String::new(),
+        gpu_name: String::new(),
         tokens_per_sec: 0.0,
         thermal: "cool".into(),
         role: None,
@@ -804,6 +882,226 @@ fn capture_lms(args: &[&str], timeout: Duration) -> Option<String> {
         return None;
     }
     capture(exe.to_str()?, args, timeout)
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MeshManifest {
+    #[serde(default)]
+    telemetry_port: Option<u16>,
+    #[serde(default)]
+    nodes: Vec<ManifestNode>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManifestNode {
+    hostname: String,
+    #[serde(default)]
+    vram_gb: Option<f64>,
+    #[serde(default)]
+    telemetry_host: Option<String>,
+}
+
+fn load_manifest() -> MeshManifest {
+    for path in manifest_paths() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(manifest) = serde_json::from_str::<MeshManifest>(&text) {
+            return manifest;
+        }
+    }
+    MeshManifest {
+        telemetry_port: None,
+        nodes: Vec::new(),
+    }
+}
+
+fn manifest_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(custom) = std::env::var("MURMURATION_MESH_MANIFEST") {
+        paths.push(PathBuf::from(custom));
+    }
+    paths.push(PathBuf::from("mesh.manifest.json"));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            paths.push(dir.join("mesh.manifest.json"));
+        }
+    }
+    paths
+}
+
+fn telemetry_port(manifest: &MeshManifest) -> u16 {
+    if let Ok(raw) = std::env::var("MURMURATION_TELEMETRY_PORT") {
+        if let Ok(port) = raw.parse::<u16>() {
+            if port > 0 {
+                return port;
+            }
+        }
+    }
+    manifest.telemetry_port.unwrap_or(9471)
+}
+
+pub fn apply_capacity(state: &mut AppState, local_inferred_gb: f64, local_file_gb: f64) {
+    let manifest = load_manifest();
+    let port = telemetry_port(&manifest);
+    let hosts: Vec<(String, String, bool)> = state
+        .nodes
+        .iter()
+        .map(|node| {
+            let entry = manifest
+                .nodes
+                .iter()
+                .find(|item| item.hostname.eq_ignore_ascii_case(&node.hostname));
+            let host = entry
+                .and_then(|item| item.telemetry_host.clone())
+                .filter(|host| !host.is_empty())
+                .or_else(|| {
+                    if node.id != "local" && !node.tailscale_ip.is_empty() {
+                        Some(node.tailscale_ip.clone())
+                    } else if node.id == "local" {
+                        Some("127.0.0.1".into())
+                    } else {
+                        None
+                    }
+                });
+            (node.id.clone(), host.unwrap_or_default(), node.id == "local")
+        })
+        .collect();
+
+    for node in &mut state.nodes {
+        if let Some(entry) = manifest.nodes.iter().find(|item| item.hostname.eq_ignore_ascii_case(&node.hostname)) {
+            if let Some(gb) = entry.vram_gb {
+                if gb > 0.0 {
+                    node.configured_vram_gb = gb;
+                }
+            }
+        }
+        if node.id == "local" {
+            let floor = if local_inferred_gb > 0.0 { local_inferred_gb } else { local_file_gb };
+            if floor > node.inferred_vram_gb {
+                node.inferred_vram_gb = round1(floor);
+            }
+        }
+    }
+
+    for (id, host, is_local) in hosts {
+        let needs_measure = state
+            .node_mut(&id)
+            .map(|node| node.gpus.iter().all(|gpu| gpu.vram_total_gb <= 0.0))
+            .unwrap_or(false);
+        if !needs_measure || host.is_empty() {
+            continue;
+        }
+        if is_local && state.node_mut(&id).and_then(|node| node.gpus.first()).is_some() {
+            continue;
+        }
+        if let Some(gpus) = fetch_peer_metrics(&host, port) {
+            if let Some(node) = state.node_mut(&id) {
+                if !gpus.is_empty() {
+                    node.gpus = gpus;
+                    node.upstream_alive = node.upstream_alive || !is_local;
+                }
+            }
+        }
+    }
+
+    crate::state::apply_saved_hardware(state);
+    let mut summary = Vec::new();
+    for node in &mut state.nodes {
+        crate::state::refresh_vram_fields(node);
+        summary.push(format!("{} {:.1} GB {}", node.hostname, node.effective_vram_gb, node.vram_source));
+    }
+    if !summary.is_empty() {
+        state.log("local", "telemetry", "info", format!("Effective VRAM: {}.", summary.join(", ")));
+    }
+}
+
+fn inferred_from_lms_ps() -> f64 {
+    let Some(raw) = capture_lms(&["ps", "--json"], Duration::from_millis(1600)) else {
+        return 0.0;
+    };
+    inferred_gb_from_ps(&raw)
+}
+
+pub fn inferred_gb_from_ps(raw: &str) -> f64 {
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return 0.0;
+    };
+    let Some(models) = value.as_array() else {
+        return 0.0;
+    };
+    let bytes: u64 = models.iter().map(model_bytes).sum();
+    if bytes > 0 {
+        return round1(bytes as f64 / 1_000_000_000.0);
+    }
+    if models.is_empty() { 0.0 } else { models.len() as f64 }
+}
+
+pub fn gpus_from_metrics(body: &str) -> Vec<GpuMetric> {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    if let Some(list) = value.get("gpus").and_then(Value::as_array) {
+        let gpus: Vec<GpuMetric> = list
+            .iter()
+            .filter_map(|item| {
+                let total = item.get("vram_total_mb").and_then(Value::as_f64).unwrap_or(0.0);
+                if total <= 0.0 {
+                    return None;
+                }
+                let free = item.get("vram_free_mb").and_then(Value::as_f64).unwrap_or(total);
+                let util = item.get("gpu_util_pct").and_then(Value::as_f64).unwrap_or(0.0);
+                let name = item.get("name").and_then(Value::as_str).unwrap_or("GPU").to_string();
+                Some(GpuMetric {
+                    name,
+                    vram_total_gb: round1(total / 1024.0),
+                    vram_allocated_gb: round1((total - free).max(0.0) / 1024.0),
+                    utilization: util,
+                })
+            })
+            .collect();
+        if !gpus.is_empty() {
+            return gpus;
+        }
+    }
+    let total = value.get("vram_total_mb").and_then(Value::as_f64).unwrap_or(0.0);
+    if total <= 0.0 {
+        return Vec::new();
+    }
+    let free = value.get("vram_free_mb").and_then(Value::as_f64).unwrap_or(total);
+    let util = value.get("gpu_util_pct").and_then(Value::as_f64).unwrap_or(0.0);
+    let count = value.get("gpu_count").and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
+    let share = total / count as f64;
+    let free_share = free / count as f64;
+    (0..count)
+        .map(|index| GpuMetric {
+            name: format!("GPU {index}"),
+            vram_total_gb: round1(share / 1024.0),
+            vram_allocated_gb: round1((share - free_share).max(0.0) / 1024.0),
+            utilization: util,
+        })
+        .collect()
+}
+
+fn fetch_peer_metrics(host: &str, port: u16) -> Option<Vec<GpuMetric>> {
+    use std::io::{Read, Write};
+    use std::net::ToSocketAddrs;
+    let socket = if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        std::net::SocketAddr::new(ip, port)
+    } else {
+        format!("{host}:{port}").to_socket_addrs().ok()?.find(|addr| addr.is_ipv4())?
+    };
+    let mut stream = std::net::TcpStream::connect_timeout(&socket, Duration::from_millis(350)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_millis(350))).ok()?;
+    let request = format!("GET /metrics HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).ok()?;
+    let body = raw.split_once("\r\n\r\n").map(|(_, body)| body).unwrap_or(raw.as_str());
+    let gpus = gpus_from_metrics(body);
+    if gpus.is_empty() { None } else { Some(gpus) }
 }
 
 fn slug(value: &str) -> String {
@@ -1009,6 +1307,7 @@ mod tests {
                 notes: Vec::new(),
                 lm_link: Some(network),
                 link_error: None,
+                local_inferred_gb: 0.0,
             },
         );
         let names: Vec<_> = state.nodes.iter().map(|node| node.hostname.as_str()).collect();
@@ -1024,6 +1323,54 @@ mod tests {
         assert_eq!(sample.gpus.len(), 1);
         assert_eq!(sample.gpus[0].name, "NVIDIA GeForce RTX 4090");
         assert!((sample.gpus[0].vram_total_gb - 24.0).abs() < 0.1);
+        assert!((sample.gpus[0].vram_allocated_gb - 22.0).abs() < 0.1);
+        assert_eq!(sample.gpus[0].utilization, 15.0);
         assert_eq!(sample.temp_c, Some(47.0));
+    }
+
+    #[test]
+    fn nvidia_candidates_cover_windows_and_linux_paths() {
+        let paths = nvidia_smi_candidates();
+        assert!(paths.iter().any(|path| path == "nvidia-smi"));
+        if cfg!(windows) {
+            assert!(paths.iter().any(|path| path.contains("System32")));
+            assert!(paths.iter().any(|path| path.contains("NVSMI")));
+        } else {
+            assert!(paths.iter().any(|path| path == "/usr/bin/nvidia-smi"));
+            assert!(paths.iter().any(|path| path.contains("/usr/local/nvidia/bin")));
+        }
+    }
+
+    #[test]
+    fn loaded_model_bytes_become_inferred_vram() {
+        let network = parse_lm_link(
+            r#"{"status":"online","deviceIdentifier":"self","deviceName":"FamilyRoom","peers":[{"deviceIdentifier":"peer","deviceName":"GamingPC","status":"connected","loadedModels":[{"identifier":"qwen","sizeBytes":10400000000}]}]}"#,
+        )
+        .unwrap();
+        let nodes = reconcile_lm_link(&[], &network);
+        let gaming = nodes.iter().find(|node| node.hostname == "GamingPC").unwrap();
+        assert!(gaming.inferred_vram_gb > 10.0);
+        let mut state = AppState::boot();
+        state.nodes = nodes;
+        apply_capacity(&mut state, 9.7, 0.0);
+        let local = state.nodes.iter().find(|node| node.id == "local").unwrap();
+        assert!((local.inferred_vram_gb - 9.7).abs() < 0.05);
+        assert_eq!(local.vram_source, "inferred");
+        assert!(local.effective_vram_gb > 0.0);
+    }
+
+    #[test]
+    fn metrics_json_reports_total_free_and_utilization() {
+        let gpus = gpus_from_metrics(r#"{"vram_total_mb":24576,"vram_free_mb":8192,"gpu_util_pct":12.5,"gpu_count":1}"#);
+        assert_eq!(gpus.len(), 1);
+        assert!((gpus[0].vram_total_gb - 24.0).abs() < 0.1);
+        assert!((gpus[0].vram_allocated_gb - 16.0).abs() < 0.1);
+        assert_eq!(gpus[0].utilization, 12.5);
+    }
+
+    #[test]
+    fn lms_ps_size_is_an_inferred_floor() {
+        let gb = inferred_gb_from_ps(r#"[{"identifier":"qwen","sizeBytes":10449205696}]"#);
+        assert!((gb - 10.4).abs() < 0.1);
     }
 }

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useSwarm } from "../store";
 import { commitShard, mountModel, pullModel, activateBlueprint, refreshDiscovery, inTauri } from "../lib/actions";
 import { cx, gb, hostName, vramOf } from "../lib/format";
@@ -20,12 +21,41 @@ export function Sidebar() {
   );
 }
 
+function nodeHaystack(node: SwarmNode): string {
+  const { total, allocated } = vramOf(node);
+  return [
+    node.hostname,
+    node.status,
+    node.role ?? "",
+    node.cpuName,
+    node.gpuName,
+    node.vramSource,
+    node.ramGb > 0 ? `${gb(node.ramGb)} ${node.ramGb}` : "",
+    node.configuredVramGb > 0 ? `${gb(node.configuredVramGb)} ${node.configuredVramGb}` : "",
+    node.effectiveVramGb > 0 ? `${gb(node.effectiveVramGb)} ${node.effectiveVramGb}` : "",
+    total > 0 ? `${gb(total)} ${gb(allocated)} ${total} ${allocated}` : "",
+    ...node.gpus.map((gpu) => gpu.name),
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function matchesHardware(node: SwarmNode, query: string): boolean {
+  const parts = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return true;
+  const haystack = nodeHaystack(node);
+  return parts.every((part) => haystack.includes(part));
+}
+
 function NodeTree() {
   const snapshot = useSwarm((state) => state.snapshot);
   const selected = useSwarm((state) => state.selectedNodeId);
+  const [query, setQuery] = useState("");
   const nodes = snapshot.nodes.filter((node) => !node.simulated);
+  const visible = nodes.filter((node) => matchesHardware(node, query));
   const waiting = snapshot.linkStatus === "pending" && nodes.length === 0;
   const empty = !waiting && nodes.length === 0;
+  const unmatched = !waiting && !empty && visible.length === 0;
   return (
     <div className="flex min-h-full flex-col">
       <div className="flex items-start gap-2 px-3 py-2">
@@ -45,10 +75,22 @@ function NodeTree() {
           Refresh
         </button>
       </div>
+      {nodes.length > 0 && (
+        <label className="block px-3 pb-2">
+          <span className="sr-only">Search devices</span>
+          <input
+            className="w-full rounded border border-line bg-canvas px-2 py-1 text-[12px]"
+            placeholder="Search VRAM, RAM, CPU, GPU"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+        </label>
+      )}
       {waiting && <p className="px-3 py-6 text-sm text-mute">Checking LM Link…</p>}
       {empty && <p className="px-3 py-6 text-sm text-mute">No devices on this LM Link.</p>}
+      {unmatched && <p className="px-3 py-6 text-sm text-mute">No devices match.</p>}
       <ul className="pb-2">
-        {nodes.map((node) => (
+        {visible.map((node) => (
           <NodeRow key={node.id} node={node} selected={selected === node.id} />
         ))}
       </ul>
@@ -72,8 +114,13 @@ function NodeRow({ node, selected }: { node: SwarmNode; selected: boolean }) {
         <div className="truncate pl-4 font-mono text-[10px] text-faint">
           {node.status}
           {node.role ? ` · ${node.role}` : ""}
-          {total > 0 ? ` · ${gb(allocated)} / ${gb(total)} GB` : ""}
+          {total > 0 ? ` · ${gb(allocated)} / ${gb(total)} GB` : node.effectiveVramGb > 0 ? ` · ${node.vramSource} ${gb(node.effectiveVramGb)} GB` : ""}
         </div>
+        {(node.cpuName || node.gpuName || node.ramGb > 0) && (
+          <div className="truncate pl-4 font-mono text-[10px] text-faint">
+            {[node.cpuName, node.gpuName, node.ramGb > 0 ? `${gb(node.ramGb)} GB RAM` : ""].filter(Boolean).join(" · ")}
+          </div>
+        )}
       </button>
     </li>
   );

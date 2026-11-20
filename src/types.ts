@@ -23,6 +23,13 @@ export interface SwarmNode {
   upstreamAlive: boolean;
   gpus: GpuMetric[];
   unifiedMemoryGb: number | null;
+  configuredVramGb: number;
+  inferredVramGb: number;
+  effectiveVramGb: number;
+  vramSource: "measured" | "configured" | "inferred" | "none" | string;
+  ramGb: number;
+  cpuName: string;
+  gpuName: string;
   tokensPerSec: number;
   thermal: Thermal | string;
   role: string | null;

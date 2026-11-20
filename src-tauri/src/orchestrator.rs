@@ -1,5 +1,5 @@
 use crate::fit;
-use crate::state::{hostname_for, node_vram, AppState, SwarmNode};
+use crate::state::{hostname_for, node_vram, refresh_vram_fields, vram_rank, AppState, SwarmNode};
 use serde::Serialize;
 
 #[derive(Clone, Serialize)]
@@ -47,12 +47,21 @@ fn healthy(node: &SwarmNode) -> bool {
 }
 
 fn total_vram(node: &SwarmNode) -> f64 {
-    node_vram(node).0
+    vram_rank(node).0
+}
+
+fn capacity_order(a: &SwarmNode, b: &SwarmNode) -> std::cmp::Ordering {
+    let (left_gb, left_tier) = vram_rank(a);
+    let (right_gb, right_tier) = vram_rank(b);
+    right_gb
+        .total_cmp(&left_gb)
+        .then(right_tier.cmp(&left_tier))
+        .then(a.hostname.cmp(&b.hostname))
 }
 
 pub fn route(state: &AppState, requested_model: Option<&str>) -> RouteDecision {
     let mut eligible: Vec<&SwarmNode> = state.nodes.iter().filter(|node| healthy(node) && total_vram(node) > 0.0).collect();
-    eligible.sort_by(|a, b| total_vram(b).total_cmp(&total_vram(a)).then_with(|| a.hostname.cmp(&b.hostname)));
+    eligible.sort_by(|a, b| capacity_order(a, b));
 
     let model_name = |id: &str| {
         state
@@ -73,7 +82,7 @@ pub fn route(state: &AppState, requested_model: Option<&str>) -> RouteDecision {
             draft_hostname: None,
             draft_model: None,
             shard_nodes: Vec::new(),
-            reason: "No healthy node has VRAM. The gateway will answer with an orchestrator brief.".into(),
+            reason: "No online node has measured, configured, or model-inferred VRAM. The gateway will answer with an orchestrator brief.".into(),
             failover_from: down_hostname(state),
             proxy_url: None,
             upstream: "brief".into(),
@@ -185,14 +194,13 @@ pub fn rebalance(state: &mut AppState) -> String {
         return "No blueprint is active.".into();
     };
 
+    for node in &mut state.nodes {
+        refresh_vram_fields(node);
+    }
     let mut ranked: Vec<usize> = (0..state.nodes.len())
         .filter(|index| healthy(&state.nodes[*index]) && total_vram(&state.nodes[*index]) > 0.0)
         .collect();
-    ranked.sort_by(|a, b| {
-        total_vram(&state.nodes[*b])
-            .total_cmp(&total_vram(&state.nodes[*a]))
-            .then_with(|| state.nodes[*a].hostname.cmp(&state.nodes[*b].hostname))
-    });
+    ranked.sort_by(|a, b| capacity_order(&state.nodes[*a], &state.nodes[*b]));
 
     for node in &mut state.nodes {
         if healthy(node) {
@@ -216,7 +224,14 @@ pub fn rebalance(state: &mut AppState) -> String {
         for (offset, role) in blueprint.roles.iter().enumerate() {
             if let Some(index) = ranked.get(offset) {
                 state.nodes[*index].role = Some(role.role.clone());
-                notes.push(format!("{} → {}", state.nodes[*index].hostname, role.role));
+                let (gb, _) = vram_rank(&state.nodes[*index]);
+                notes.push(format!(
+                    "{} → {} ({:.1} GB {})",
+                    state.nodes[*index].hostname,
+                    role.role,
+                    gb,
+                    state.nodes[*index].vram_source
+                ));
             } else {
                 notes.push(format!("no healthy node for {}", role.role));
             }
@@ -541,5 +556,50 @@ mod tests {
         let err = commit_shard(&mut state, "llama-405b").unwrap_err();
         assert!(err.contains("does not fit") || err.contains("GB"));
         assert!(state.models.iter().any(|model| model.id == "qwen-32b" && model.loaded));
+    }
+
+    #[test]
+    fn rebalance_ranks_online_nodes_with_inferred_or_configured_vram() {
+        let mut state = AppState::boot();
+        state.active_blueprint_id = "refactor".into();
+        let mut family = crate::state::bare_node("local", "FamilyRoom");
+        family.inferred_vram_gb = 10.4;
+        let mut gaming = crate::state::bare_node("lm-game", "GamingPC");
+        gaming.configured_vram_gb = 16.0;
+        let mut timmy = crate::state::bare_node("lm-tim", "Timmys-PC");
+        timmy.gpus.push(crate::state::GpuMetric {
+            name: "RTX".into(),
+            vram_total_gb: 8.0,
+            vram_allocated_gb: 1.0,
+            utilization: 4.0,
+        });
+        state.nodes = vec![family, gaming, timmy];
+        let summary = rebalance(&mut state);
+        let role = |name: &str| state.nodes.iter().find(|node| node.hostname == name).unwrap().role.clone();
+        assert_eq!(role("GamingPC").as_deref(), Some("architect"));
+        assert_eq!(role("FamilyRoom").as_deref(), Some("coder"));
+        assert_eq!(role("Timmys-PC").as_deref(), Some("critic"));
+        assert!(!summary.contains("no healthy node"));
+        assert!(state.nodes.iter().all(|node| node.role.as_deref() != Some("standby")));
+    }
+
+    #[test]
+    fn measured_vram_outranks_the_same_configured_size() {
+        let mut state = AppState::boot();
+        state.active_blueprint_id = "refactor".into();
+        let mut measured = crate::state::bare_node("lm-measured", "Measured");
+        measured.gpus.push(crate::state::GpuMetric {
+            name: "RTX".into(),
+            vram_total_gb: 16.0,
+            vram_allocated_gb: 0.0,
+            utilization: 1.0,
+        });
+        let mut configured = crate::state::bare_node("lm-config", "Configured");
+        configured.configured_vram_gb = 16.0;
+        state.nodes = vec![configured, measured];
+        rebalance(&mut state);
+        let architect = state.nodes.iter().find(|node| node.role.as_deref() == Some("architect")).unwrap();
+        assert_eq!(architect.hostname, "Measured");
+        assert_eq!(architect.vram_source, "measured");
     }
 }

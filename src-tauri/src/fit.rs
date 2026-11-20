@@ -1,4 +1,4 @@
-use crate::state::{node_vram, InferenceParams, ModelArtifact, SwarmNode};
+use crate::state::{node_vram, vram_rank, InferenceParams, ModelArtifact, SwarmNode};
 use serde::Serialize;
 
 #[derive(Clone, Serialize)]
@@ -59,8 +59,9 @@ pub fn calculate(model: &ModelArtifact, nodes: &[SwarmNode], params: &InferenceP
     let gpu_need = gpu_weights + kv_gb + scratch_gb;
 
     let capacity_of = |node: &SwarmNode| {
-        let (total, allocated) = node_vram(node);
-        if params.evict_for_fit {
+        let (measured, allocated) = node_vram(node);
+        let total = if measured > 0.0 { measured } else { vram_rank(node).0 };
+        if params.evict_for_fit || measured <= 0.0 {
             total
         } else {
             (total - allocated).max(0.0)

@@ -21,7 +21,7 @@ The studio is four zones.
 
 ![LM Link list and the workbench](docs/images/workbench.png)
 
-Each LM Link row shows whether the device is online, whether it is this computer, and whether it is the preferred device. VRAM appears only when a local GPU probe returns it. Refresh asks `lms link status` again.
+Each LM Link row shows whether the device is online, whether it is this computer, and whether it is the preferred device. A row also shows measured VRAM when a GPU probe returns it, or the configured or inferred size when that is what ranking uses. CPU, GPU, and RAM appear on the row after you save them. The search box under Refresh matches the device name, status, role, CPU, GPU, and those sizes. Refresh asks `lms link status` again.
 
 The workbench takes one objective, splits it across roles, and keeps the resulting artifact editable. The traffic tab records the routing decision, time to first token, and whether the reply came from a live LM Studio or from the orchestrator brief.
 
@@ -76,9 +76,41 @@ lms link status --json
 
 The desktop app parses that JSON. This device stays first. Every peer in the payload is added, including a peer that was missing from the previous list. A device that is not in the payload is removed from the window. Simulated demo machines are not members and are not shown.
 
-The command does not include Tailscale addresses or GPU memory. Those stay blank until a separate probe fills them in. On this computer, `nvidia-smi` and `tailscale` were not on `PATH`, so the cards say VRAM is unknown and the log says Tailscale status is not available. That is a missing probe, not a guessed device.
+The command does not include GPU memory. Effective VRAM is chosen in three steps, and a higher step wins a tie:
+
+1. **Measured.** `nvidia-smi` on this PC, or a peer `GET /metrics` payload.
+2. **Configured.** A VRAM number you save in the inspector, or `vramGb` in `mesh.manifest.json`. A number you save replaces the manifest value for that device name. Saving a blank VRAM field clears it.
+3. **Inferred.** The footprint of models loaded by `lms ps`, a loaded LM Link model size, or the largest local GGUF.
+
+An online device with a measured, configured, or inferred size stays in the role ranking. A device whose three sizes are all zero stays on standby. A stress injection with no utilization sample drives synthetic tokens per second and does not mark the real device throttled.
+
+`nvidia-smi` is resolved from `PATH`, then `C:\Windows\System32\nvidia-smi.exe` and `C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe` on Windows, or `/usr/bin/nvidia-smi` and `/usr/local/nvidia/bin/nvidia-smi` on Linux. The query reads `memory.total`, `memory.free`, and `utilization.gpu`.
+
+Copy `mesh.manifest.example.json` to `mesh.manifest.json` to name a sidecar host. The default port is 9471. `MURMURATION_MESH_MANIFEST` and `MURMURATION_TELEMETRY_PORT` override the file.
+
+On each other PC:
+
+```bash
+python telemetry_sidecar.py --port 9471
+```
+
+`GET /metrics` returns `vram_total_mb`, `vram_free_mb`, `gpu_util_pct`, and `gpu_count`. Use the sidecar only on a LAN you trust. A missing `nvidia-smi` returns zeros and HTTP 200, and Murmuration treats a zero total as no measurement.
 
 If `lms link status` cannot be read, the list does not invent peers. It shows the error and keeps any devices already confirmed on the link.
+
+## Hardware you type in
+
+Select a device. The inspector has four fields: VRAM GB, RAM GB, CPU, and GPU. **Save hardware** stores them by device name in `%LOCALAPPDATA%\Murmuration\hardware.json` on Windows, or `~/Murmuration/hardware.json` elsewhere. `MURMURATION_HARDWARE_FILE` points at a different file. Rediscovery keeps the saved values, including for a device that is offline when you next open the app.
+
+Saved VRAM is the configured size in the ranking above. RAM, CPU, and GPU are labels. They show on the device row and are included in search. The search box is case-insensitive. Every word has to match. An empty search shows the whole link. If devices are listed and none match, the pane says **No devices match.**
+
+```json
+{
+  "nodes": [
+    { "hostname": "FamilyRoom", "vramGb": 24, "ramGb": 64, "cpu": "Ryzen 9 7950X", "gpu": "RTX 4090" }
+  ]
+}
+```
 
 ## Routing, VRAM, and sharding
 
@@ -125,9 +157,11 @@ src/                  React studio
 src-tauri/src/        Discovery, telemetry, fit, orchestrator, gateway, MCP
 extensions/           SwarmPlugin manifests
 docs/images/          README screenshots
+telemetry_sidecar.py  Zero-dependency GPU metrics server
+mesh.manifest.example.json
 ```
 
-Rust discovery tests cover two rules: devices outside the LM Link are dropped from the list, and devices present in `lms link status` are added when the list did not already have them. Unrelated model records stay.
+Rust tests cover LM Link filtering, the three VRAM tiers, nvidia-smi path lookup, the metrics JSON shape, synthetic stress without a GPU sample, and saving hardware by device name so search can find the CPU, GPU, RAM, and VRAM. Unrelated model records stay.
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml

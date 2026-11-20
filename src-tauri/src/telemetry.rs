@@ -106,6 +106,29 @@ fn tick(state: &mut AppState) {
     }
 }
 
+pub fn apply_synthetic_stress(node: &mut SwarmNode, tick: u64) {
+    let wave = ((tick as f64) * 0.37).sin().abs();
+    node.tokens_per_sec = 28.0 + wave * 14.0;
+    node.throughput_mbps = 10.0 + wave * 6.0;
+    node.thermal = "hot".into();
+    node.last_seen = now_iso();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthetic_stress_runs_without_a_gpu_sample() {
+        let mut node = crate::state::bare_node("local", "FamilyRoom");
+        apply_synthetic_stress(&mut node, 3);
+        assert!(node.tokens_per_sec > 20.0);
+        assert_eq!(node.thermal, "hot");
+        assert!(node.gpus.is_empty());
+        assert_eq!(node.status, "online");
+    }
+}
+
 fn advance_node(node: &mut SwarmNode, tick: u64, stress: bool, inference: bool, hot: bool) {
     if matches!(node.status.as_str(), "offline" | "sleeping") {
         node.tokens_per_sec = 0.0;
@@ -114,6 +137,15 @@ fn advance_node(node: &mut SwarmNode, tick: u64, stress: bool, inference: bool, 
             gpu.utilization = (gpu.utilization * 0.8).max(0.0);
         }
         return;
+    }
+
+    if !node.simulated && stress && node.gpus.iter().all(|gpu| gpu.vram_total_gb <= 0.0) {
+        apply_synthetic_stress(node, tick);
+        return;
+    }
+    if !node.simulated && !stress && node.gpus.is_empty() && node.thermal == "hot" {
+        node.thermal = "cool".into();
+        node.tokens_per_sec = 0.0;
     }
 
     if node.simulated {

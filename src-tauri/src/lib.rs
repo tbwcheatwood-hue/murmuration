@@ -47,6 +47,7 @@ pub fn run() {
             commands::set_demo_mesh,
             commands::inject_load,
             commands::set_node_status,
+            commands::set_node_hardware,
             commands::plan_objective,
             commands::set_inference_active,
             commands::apply_exit_node,

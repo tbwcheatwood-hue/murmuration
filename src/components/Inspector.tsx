@@ -1,8 +1,8 @@
-import { useEffect } from "react";
-import { applyExitNode, calculateFit, commitShard, setNodeStatus, setToolPolicy, updateParams } from "../lib/actions";
+import { useEffect, useState } from "react";
+import { applyExitNode, calculateFit, commitShard, setNodeHardware, setNodeStatus, setToolPolicy, updateParams } from "../lib/actions";
 import { gb, vramOf } from "../lib/format";
 import { useSwarm } from "../store";
-import type { InferenceParams } from "../types";
+import type { InferenceParams, SwarmNode } from "../types";
 
 export function Inspector() {
   const snapshot = useSwarm((state) => state.snapshot);
@@ -64,6 +64,7 @@ export function Inspector() {
               </p>
             ))}
             {node.gpus.length === 0 && <p className="mt-2 text-[12px] text-faint">No GPU telemetry on this node yet.</p>}
+            <HardwareForm node={node} />
             <div className="mt-3 flex flex-wrap gap-1">
               <Mini
                 label="Drop"
@@ -213,6 +214,64 @@ export function Inspector() {
         {node && node.gpus.length > 0 && <p className="mt-3 font-mono text-[10px] text-faint">free {gb(Math.max(0, vramOf(node).total - vramOf(node).allocated))} GB on this node</p>}
       </div>
     </aside>
+  );
+}
+
+function textGb(value: number): string {
+  return value > 0 ? String(value) : "";
+}
+
+function parseGb(value: string): number {
+  const parsed = Number(value.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+function HardwareForm({ node }: { node: SwarmNode }) {
+  const [vram, setVram] = useState(textGb(node.configuredVramGb));
+  const [ram, setRam] = useState(textGb(node.ramGb));
+  const [cpu, setCpu] = useState(node.cpuName);
+  const [gpu, setGpu] = useState(node.gpuName);
+
+  useEffect(() => {
+    setVram(textGb(node.configuredVramGb));
+    setRam(textGb(node.ramGb));
+    setCpu(node.cpuName);
+    setGpu(node.gpuName);
+  }, [node.id, node.configuredVramGb, node.ramGb, node.cpuName, node.gpuName]);
+
+  return (
+    <form
+      className="mt-3 grid grid-cols-2 gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void setNodeHardware(node.id, parseGb(vram), parseGb(ram), cpu, gpu)
+          .then((snap) => useSwarm.getState().applySnapshot(snap))
+          .catch((error: Error) => useSwarm.getState().pushToast(error.message, "warn"));
+      }}
+    >
+      <Field label="VRAM GB" value={vram} onChange={setVram} numeric />
+      <Field label="RAM GB" value={ram} onChange={setRam} numeric />
+      <Field label="CPU" value={cpu} onChange={setCpu} />
+      <Field label="GPU" value={gpu} onChange={setGpu} />
+      <p className="col-span-2 text-[11px] leading-snug text-faint">Saved VRAM ranks this device when live telemetry is 0 GB. CPU, GPU, and RAM stay attached to the device name and show up in the LM Link search.</p>
+      <button className="col-span-2 rounded border border-line px-2 py-1 text-[11px] text-mute hover:text-ink" type="submit">
+        Save hardware
+      </button>
+    </form>
+  );
+}
+
+function Field({ label, value, onChange, numeric }: { label: string; value: string; onChange: (value: string) => void; numeric?: boolean }) {
+  return (
+    <label className="block text-[11px] text-mute">
+      {label}
+      <input
+        className="mt-1 w-full rounded border border-line bg-canvas px-2 py-1 font-mono text-[11px] text-ink"
+        inputMode={numeric ? "decimal" : "text"}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    </label>
   );
 }
 

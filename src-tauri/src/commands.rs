@@ -2,7 +2,7 @@ use crate::discovery;
 use crate::fit::{self, FitResult};
 use crate::mcp;
 use crate::orchestrator::{self, TaskPlan};
-use crate::state::{write_lock, InferenceParams, Shared, Snapshot, Transfer};
+use crate::state::{assign_hardware, hardware_file_path, upsert_hardware, write_lock, HardwareEntry, InferenceParams, Shared, Snapshot, Transfer};
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::process::Command;
@@ -165,8 +165,52 @@ pub fn set_demo_mesh(state: tauri::State<Shared>, _enabled: bool) -> Snapshot {
 pub fn inject_load(state: tauri::State<Shared>) -> Snapshot {
     let mut st = write_lock(state.inner());
     st.stress_ticks = 16;
-    st.log("gateway", "telemetry", "warn", "Stress load injected. Thermal failover can trip if a node crosses 93%.");
+    let measured = st.nodes.iter().any(|node| crate::state::node_vram(node).0 > 0.0);
+    if measured {
+        st.log("gateway", "telemetry", "warn", "Stress load injected. Thermal failover can trip if a node crosses 93%.");
+    } else {
+        st.log(
+            "gateway",
+            "telemetry",
+            "warn",
+            "No GPU utilization sample is available. Stress is a synthetic token load on the LM Link devices.",
+        );
+    }
     st.snapshot()
+}
+
+#[tauri::command]
+pub fn set_node_hardware(
+    state: tauri::State<Shared>,
+    node_id: String,
+    vram_gb: f64,
+    ram_gb: f64,
+    cpu: String,
+    gpu: String,
+) -> Result<Snapshot, String> {
+    if !vram_gb.is_finite() || !ram_gb.is_finite() || vram_gb < 0.0 || ram_gb < 0.0 {
+        return Err("VRAM and RAM must be zero or a positive number of GB.".into());
+    }
+    let mut st = write_lock(state.inner());
+    let hostname = st
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .map(|node| node.hostname.clone())
+        .ok_or_else(|| format!("Unknown node {node_id}"))?;
+    let entry = HardwareEntry {
+        hostname: hostname.clone(),
+        vram_gb,
+        ram_gb,
+        cpu,
+        gpu,
+    };
+    if let Some(node) = st.node_mut(&node_id) {
+        assign_hardware(node, &entry);
+    }
+    upsert_hardware(&hardware_file_path(), entry)?;
+    st.log("gateway", "telemetry", "info", format!("{hostname} hardware values saved."));
+    Ok(st.snapshot())
 }
 
 #[tauri::command]
