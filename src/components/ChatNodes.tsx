@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { foxChat, foxStatus, type FoxStatus } from "../lib/actions";
+import { foxStatus, type FoxStatus } from "../lib/actions";
+import { sendLinkedChat, useBoard } from "../lib/tim/board";
 import { FOX_PROFILES, LM_STUDIO_BASE, TOOL_CATALOG, createNode } from "../lib/tim/graph";
 import type { ChatInData, ChatIntegration, ChatOutData, GraphNode, ToolServer } from "../lib/tim/types";
 
@@ -30,8 +31,9 @@ export function ChatNodes({
   const outputData = output?.data as ChatOutData | undefined;
   const integration = inputData?.integration;
   const [status, setStatus] = useState<FoxStatus | null>(null);
-  const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+  const running = useBoard().running;
+  const runError = useBoard().runError;
 
   useEffect(() => {
     void foxStatus().then(setStatus).catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
@@ -58,16 +60,8 @@ export function ChatNodes({
 
   async function send() {
     if (!integration || !inputData) return;
-    setSending(true);
     setError("");
-    try {
-      const reply = await foxChat(inputData.text, integration.model, integration.temperature, integration.maxTokens, integration.foxProfile, integration.tools);
-      patchText("chat_out", reply);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setSending(false);
-    }
+    await sendLinkedChat();
   }
 
   const listed = status?.models.length ? status.models : modelNames;
@@ -136,8 +130,8 @@ export function ChatNodes({
             onChange={(event) => patchIntegration({ maxTokens: Number(event.target.value) })}
           />
         </label>
-        <button className="border border-line px-3 py-1 text-xs text-ink" onClick={() => void send()} disabled={sending}>
-          {sending ? "Asking LM Studio…" : "Send"}
+        <button className="border border-line px-3 py-1 text-xs text-ink" onClick={() => void send()} disabled={running}>
+          {running ? "Asking LM Studio…" : "Send"}
         </button>
       </div>
       <p className="mt-2 text-[11px] text-faint">{FOX_PROFILES.find((profile) => profile.id === integration?.foxProfile)?.hint} Endpoint {LM_STUDIO_BASE}.</p>
@@ -151,7 +145,7 @@ export function ChatNodes({
           );
         })}
       </div>
-      {error && <p className="mt-2 text-xs text-danger">{error}</p>}
+      {(runError || error) && <p className="mt-2 text-xs text-danger">{runError || error}</p>}
     </div>
   );
 }

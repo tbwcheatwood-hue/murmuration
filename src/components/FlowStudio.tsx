@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { fetchFlowWorkflow, inTauri, listFlowCatalog, runCanvasTool } from "../lib/actions";
+import { commitFlow, setChatNodes, stageFlow, useBoard } from "../lib/tim/board";
 import { bundledFlows, bundledN8n, type BundledFlow } from "../lib/tim/bundled";
 import { convertWorkflow, parseWorkflowText } from "../lib/tim/convert";
-import { TOOL_CATALOG, createNode } from "../lib/tim/graph";
-import type { CatalogHit, GraphNode, ImportConversionResult, ToolServer } from "../lib/tim/types";
+import { TOOL_CATALOG } from "../lib/tim/graph";
+import type { CatalogHit, ImportConversionResult, ToolServer, WorkflowPlatform } from "../lib/tim/types";
 import { ChatNodes } from "./ChatNodes";
 import { useSwarm } from "../store";
 
@@ -86,14 +87,18 @@ export function FlowCatalog() {
         <button className="mx-2 mt-2 border border-line px-2 py-1 text-left text-[11px] text-mute hover:text-ink" onClick={() => void refresh()} disabled={busy}>
         {busy ? "Pulling catalogs…" : "Pull Langflow, Flowise, and n8n"}
       </button>
-      <p className="px-3 pt-2 text-[11px] text-faint">Chat input and chat output talk to FOX. LM Studio on port 1234 manages the model.</p>
+      <p className="px-3 pt-2 text-[11px] text-faint">A click places the flow on the topology, between FOX chat input and chat output.</p>
       {notice && <p className="px-3 py-2 text-[11px] text-mute">{notice}</p>}
       <div className="min-h-0 flex-1 overflow-auto py-1">
         {visibleBundled.map((flow) => (
           <button
             key={flow.key}
             className={`block w-full truncate px-3 py-1 text-left text-xs hover:bg-panel-2 ${selection?.kind === "bundled" && selection.flow.key === flow.key ? "text-ink" : "text-mute"}`}
-            onClick={() => publish({ ...studio, selection: { kind: "bundled", flow } })}
+            onClick={() => {
+              publish({ ...studio, selection: { kind: "bundled", flow } });
+              stageFlow(flow.key, flow.name, flow.platform);
+              commitFlow(flow.key, flow.platform, convertWorkflow(flow.body));
+            }}
           >
             <span className="mr-2 font-mono text-[10px] uppercase text-faint">{flow.platform}</span>
             {flow.name}
@@ -103,7 +108,10 @@ export function FlowCatalog() {
           <button
             key={hit.rawUrl}
             className={`block w-full truncate px-3 py-1 text-left text-xs hover:bg-panel-2 ${selection?.kind === "remote" && selection.hit.rawUrl === hit.rawUrl ? "text-ink" : "text-mute"}`}
-            onClick={() => publish({ ...studio, selection: { kind: "remote", hit } })}
+            onClick={() => {
+              publish({ ...studio, selection: { kind: "remote", hit } });
+              stageFlow(hit.rawUrl, hit.name, hit.platform);
+            }}
           >
             <span className="mr-2 font-mono text-[10px] uppercase text-faint">{hit.platform}</span>
             {hit.name}
@@ -152,26 +160,38 @@ export function FlowStudio() {
   const converted = useConverted(selection, pasted);
   const models = useSwarm((state) => state.snapshot.models);
   const modelNames = models.map((model) => model.name);
-  const [graphNodes, setGraphNodes] = useState<GraphNode[]>(() => [createNode("chat_in", { x: 40, y: 40 }), createNode("chat_out", { x: 40, y: 220 })]);
+  const chatNodes = useBoard().chatNodes;
   const preset = TOOL_CATALOG.find((item) => item.id === server);
 
   useEffect(() => {
-    if (!converted?.ok || !converted.graph) return;
-    const imported = converted.graph.nodes;
-    const chatIn = imported.find((node) => node.type === "chat_in") ?? createNode("chat_in", { x: 40, y: 40 });
-    const chatOut = imported.find((node) => node.type === "chat_out") ?? createNode("chat_out", { x: 40, y: 220 });
-    setGraphNodes([chatIn, chatOut, ...imported.filter((node) => node.type !== "chat_in" && node.type !== "chat_out")]);
-  }, [converted]);
+    if (!pasted.trim()) return;
+    const result = parseWorkflowText(pasted);
+    if (!result.ok) return;
+    commitFlow("pasted", result.detectedSource, result);
+  }, [pasted]);
 
   useEffect(() => {
     if (!selection || selection.kind !== "remote" || selection.text || selection.error) return;
     let cancelled = false;
     void fetchFlowWorkflow(selection.hit.rawUrl)
       .then((text) => {
-        if (!cancelled) publish({ ...studio, selection: { kind: "remote", hit: selection.hit, text } });
+        if (!cancelled) {
+          publish({ ...studio, selection: { kind: "remote", hit: selection.hit, text } });
+          commitFlow(selection.hit.rawUrl, selection.hit.platform, parseWorkflowText(text));
+        }
       })
       .catch((err) => {
-        if (!cancelled) publish({ ...studio, selection: { kind: "remote", hit: selection.hit, error: err instanceof Error ? err.message : String(err) } });
+        const message = err instanceof Error ? err.message : String(err);
+        if (!cancelled) {
+          publish({ ...studio, selection: { kind: "remote", hit: selection.hit, error: message } });
+          commitFlow(selection.hit.rawUrl, selection.hit.platform, {
+            ok: false,
+            error: message,
+            name: selection.hit.name,
+            summary: [],
+            detectedSource: (selection.hit.platform as WorkflowPlatform) || "unknown",
+          });
+        }
       });
     return () => {
       cancelled = true;
@@ -215,7 +235,7 @@ export function FlowStudio() {
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-canvas">
       <div className="flex h-9 items-center border-b border-line px-3 text-[12px] text-mute">FOX chat, flow import, and canvas tools. LM Studio manages the model.</div>
-      <ChatNodes nodes={graphNodes} modelNames={modelNames} onChange={setGraphNodes} />
+      <ChatNodes nodes={chatNodes} modelNames={modelNames} onChange={setChatNodes} />
       <div className="grid min-h-0 flex-1 grid-cols-2">
         <div className="min-h-0 overflow-auto border-r border-line p-3">
           <p className="text-[11px] uppercase tracking-[0.14em] text-faint">Convert</p>

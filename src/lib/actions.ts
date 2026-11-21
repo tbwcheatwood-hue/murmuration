@@ -157,6 +157,31 @@ export async function foxChat(prompt: string, model: string, temperature: number
   return call("fox_chat", { prompt, model, temperature, maxTokens, profile, tools });
 }
 
+export type IdeClient = {
+  id: string;
+  name: string;
+  configured: boolean;
+  baseUrl: string;
+  model: string;
+  path: string;
+  message: string;
+};
+
+export async function ideClientStatus(): Promise<IdeClient[]> {
+  if (!inTauri()) {
+    return [
+      { id: "cursor", name: "Cursor", configured: false, baseUrl: "http://127.0.0.1:11435/v1", model: "murmuration", path: "", message: "Pointing Cursor runs in the desktop app." },
+      { id: "zcode", name: "Zcode", configured: false, baseUrl: "http://127.0.0.1:11435/v1", model: "murmuration", path: "", message: "Pointing Zcode runs in the desktop app." },
+    ];
+  }
+  return call("ide_client_status");
+}
+
+export async function applyIdeClient(client: string): Promise<IdeClient> {
+  if (!inTauri()) throw new Error("Pointing Cursor and Zcode runs in the desktop app.");
+  return call("apply_ide_client", { client });
+}
+
 export async function runCanvasTool(server: string, args: Record<string, unknown>, workspace: string, approved: boolean): Promise<string> {
   if (!inTauri()) throw new Error("Canvas tools run in the desktop app.");
   return call("tim_run_tool", { server, args, workspace, approved });

@@ -1,3 +1,4 @@
+mod clients;
 mod commands;
 mod discovery;
 mod fit;
@@ -59,7 +60,9 @@ pub fn run() {
             tim::tim_fetch_workflow,
             tim::tim_run_tool,
             fox::fox_status,
-            fox::fox_chat
+            fox::fox_chat,
+            clients::ide_client_status,
+            clients::apply_ide_client
         ])
         .run(tauri::generate_context!())
         .expect("error while running Murmuration");

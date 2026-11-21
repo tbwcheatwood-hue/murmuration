@@ -14,8 +14,8 @@ The studio is four zones.
 
 | Zone | What it shows |
 | --- | --- |
-| Left | LM Link devices, the model registry, swarm blueprints, extensions, and the flow catalog |
-| Center | Topology, the workbench, the traffic inspector, and FOX chat |
+| Left | LM Link devices, the model registry, swarm blueprints, extensions, the flow catalog, and IDE clients |
+| Center | Topology (LM Link machines, FOX chat nodes, and clicked flows), the workbench, the traffic inspector, and FOX chat |
 | Right | Decode settings and local MCP tools |
 | Bottom | Combined VRAM and logs from lms, the gateway, and discovery |
 
@@ -27,11 +27,19 @@ The workbench takes one objective, splits it across roles, and keeps the resulti
 
 The command palette is Ctrl+K (Cmd+K on macOS). Ctrl+B toggles the sidebar, Ctrl+J toggles the log dock, and Ctrl+1 through Ctrl+4 switch the center tabs. Ctrl+4 opens FOX.
 
+## Cursor and Zcode
+
+The IDE activity points Cursor and Zcode at the gateway on this machine. The model id is `murmuration`. LM Studio still loads the weights. **Point Cursor here** writes the OpenAI base URL into Cursor's user settings and leaves every other setting in that file alone. **Point Zcode here** adds a Murmuration provider to `~/.zcode/v2/provider_config.json` on the OpenAI chat protocol, and leaves any other provider in that file alone. If Zcode is already open, restart it so the model list reloads.
+
+![IDE activity with Cursor and Zcode pointed at the Murmuration gateway](docs/images/ide-clients.png)
+
+The picture is the studio. The preview cannot write those files, so the cards say the desktop app does. The gateway bearer token is not in the picture.
+
 ## FOX chat
 
-FOX is the advisor on the fourth center tab. Chat input and chat output are canvas nodes. Send writes the reply into chat output. LM Studio at `http://127.0.0.1:1234/v1` is the runtime that loads and serves the model. FOX does not start another server and does not switch the loaded model.
+FOX is the advisor on the fourth center tab. Chat input and chat output are also nodes on the topology, and both places share the same text. Send writes the reply into chat output. LM Studio at `http://127.0.0.1:1234/v1` is the runtime that loads and serves the model. FOX does not start another server and does not switch the loaded model.
 
-Safe, Power, and Vision only change the system prompt. Temperature and the token cap are on the node. The nine tool chips name which T.I.M. tools the prompt may mention. Running a tool is still a separate click on the tool card, and the Windows shell, HTTP fetch, and MCP bridge stay off until you approve that run.
+Safe, Power, and Vision only change the system prompt. Temperature and the token cap sit on the FOX tab. The nine tool chips name which T.I.M. tools the prompt may mention. Running a tool is still a separate click on the tool card, and the Windows shell, HTTP fetch, and MCP bridge stay off until you approve that run.
 
 A reasoning model can leave the visible `content` field empty and put the reply in `reasoning_content`. Murmuration shows that text as the chat output. A long reply waits up to 180 seconds plus a quarter of the token cap, and never longer than 10 minutes.
 
@@ -39,11 +47,19 @@ A reasoning model can leave the visible `content` field empty and put the reply 
 
 ## Imported flows
 
-The Flows activity opens the catalog beside the FOX tab. Langflow and Flowise starters ship in the app. The n8n list is an index; opening an entry fetches that workflow from the allowlisted raw GitHub URL. You can also paste an export. Credentials in the JSON are dropped and called out. The conversion is structural: chat inputs and chat outputs become the FOX nodes, and brain or tool edges are not invented.
+The Flows activity opens the catalog. A click places that flow on the topology as one node, between the FOX chat input and the FOX chat output. The edge into the flow carries the prompt. The edge out of the flow carries the reply. **Run through FOX** sends the chat input through that flow's steps to the model LM Studio has loaded. The reply shows in chat output on the topology and on the FOX tab. Another click adds another flow on the same path. The highlighted flow is the one Run uses.
+
+Langflow and Flowise starters ship in the app. The n8n list is an index; opening an entry fetches that workflow from the allowlisted raw GitHub URL. You can also paste an export. Credentials in the JSON are dropped and called out. The conversion is structural: the export becomes one runnable node, and brain or tool edges are not invented.
 
 The shell tool runs `cmd.exe` in the workspace, with no console window, and stops after 20 seconds. Paths stay under the workspace. SQLite is one read-only `SELECT`. Agent memory is a JSON file under `%LOCALAPPDATA%\Murmuration`.
 
-![Flow catalog with Langflow starters and the FOX tab](docs/images/flows.png)
+![Basic Prompting on the topology between FOX chat input and chat output](docs/images/flow-topology.png)
+
+The picture is the studio after a click on Basic Prompting. Chat input, the flow, and chat output sit on one path. This preview has no LM Link devices, so the note at the top says the desktop app is what reads the account. On that app the machines stay on the same canvas. The gateway bearer token is not in the picture.
+
+The catalog stays in the sidebar while you pick another flow.
+
+![Flow catalog beside FOX chat input and chat output](docs/images/flows.png)
 
 ## Run it
 
@@ -72,7 +88,7 @@ The gateway binds to loopback only, on port 11435, and walks forward to 11444 if
 http://127.0.0.1:11435/v1
 ```
 
-Use the model id `murmuration`. Cursor, Continue, and other OpenAI-compatible clients can treat that URL as one local model.
+Use the model id `murmuration`. The IDE activity writes that URL for Cursor and for Zcode, as shown above. Continue and other OpenAI-compatible clients can use the same URL by hand.
 
 | Route | Behavior |
 | --- | --- |
@@ -170,17 +186,17 @@ A tiny WebAssembly probe in the extensions panel reports its module name. It doe
 
 ```text
 src/                  React studio
-  components/         Activity bar, LM Link list, topology, workbench, FOX, inspector
+  components/         Activity bar, LM Link list, topology, workbench, FOX, IDE clients, inspector
   lib/                Browser-side mesh, fit math, gateway client, T.I.M. converters
 catalogs/             Langflow and Flowise starters, plus the n8n index
-src-tauri/src/        Discovery, telemetry, fit, orchestrator, gateway, MCP, FOX, tools
+src-tauri/src/        Discovery, telemetry, fit, orchestrator, gateway, MCP, FOX, IDE clients, tools
 extensions/           SwarmPlugin manifests
 docs/images/          README screenshots
 telemetry_sidecar.py  Zero-dependency GPU metrics server
 mesh.manifest.example.json
 ```
 
-Rust tests cover LM Link filtering, the three VRAM tiers, nvidia-smi path lookup, the metrics JSON shape, synthetic stress without a GPU sample, saving hardware by device name, FOX replies that arrive as reasoning text, and the GitHub allowlist for imported workflows. Unrelated model records stay.
+Rust tests cover LM Link filtering, the three VRAM tiers, nvidia-smi path lookup, the metrics JSON shape, synthetic stress without a GPU sample, saving hardware by device name, FOX replies that arrive as reasoning text, the GitHub allowlist for imported workflows, and the Cursor and Zcode config writers. Unrelated settings and other Zcode providers stay.
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml
@@ -193,4 +209,5 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - It does not change Tailscale exit nodes unless you confirm that action.
 - The browser preview is not a second source of devices. It waits for the desktop shell. FOX chat in that preview says it runs in the desktop app.
 - FOX does not load a model, and it does not talk to KoboldCpp or a llamafile. LM Studio on port 1234 does the serving.
-- Imported graphs do not replay the original Langflow, Flowise, or n8n runtime. They become nodes you can edit and send through LM Studio.
+- Imported graphs do not replay the original Langflow, Flowise, or n8n runtime. A click turns the export into one topology node, and Run sends that prompt through LM Studio.
+- The IDE buttons write Cursor and Zcode config on this machine. They do not sign you into those apps, and they do not switch the model LM Studio has loaded.

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { activateBlueprint, injectLoad, rebalance, refreshDiscovery, setMode } from "../lib/actions";
+import { activateBlueprint, applyIdeClient, injectLoad, rebalance, refreshDiscovery, setMode } from "../lib/actions";
 import { runObjective } from "../lib/run";
 import { useSwarm } from "../store";
 import { cx } from "../lib/format";
@@ -32,6 +32,38 @@ export function CommandPalette() {
       { id: "workbench", title: "Show workbench", hint: "Ctrl+2", group: "View", run: () => useSwarm.getState().setTab("workbench") },
       { id: "traffic", title: "Show traffic inspector", hint: "Ctrl+3", group: "View", run: () => useSwarm.getState().setTab("traffic") },
       { id: "fox", title: "Show FOX chat", hint: "Ctrl+4", group: "View", run: () => useSwarm.getState().setTab("chat") },
+      {
+        id: "ide",
+        title: "Show IDE clients",
+        hint: "Cursor and Zcode",
+        group: "View",
+        run: () => {
+          useSwarm.getState().setActivity("clients");
+          if (!useSwarm.getState().sidebarOpen) useSwarm.getState().toggleSidebar();
+        },
+      },
+      {
+        id: "point-cursor",
+        title: "Point Cursor at the mesh",
+        hint: "model murmuration",
+        group: "IDE",
+        run: () => {
+          void applyIdeClient("cursor")
+            .then((client) => useSwarm.getState().pushToast(client.message))
+            .catch((error: Error) => useSwarm.getState().pushToast(error.message, "warn"));
+        },
+      },
+      {
+        id: "point-zcode",
+        title: "Point Zcode at the mesh",
+        hint: "model murmuration",
+        group: "IDE",
+        run: () => {
+          void applyIdeClient("zcode")
+            .then((client) => useSwarm.getState().pushToast(client.message))
+            .catch((error: Error) => useSwarm.getState().pushToast(error.message, "warn"));
+        },
+      },
       { id: "run", title: "Run the current objective", hint: "Ctrl+Enter", group: "Swarm", run: () => void runObjective() },
       { id: "rebalance", title: "Rebalance roles by VRAM", hint: "orchestrator", group: "Swarm", run: apply(() => rebalance()) },
       { id: "pipeline", title: "Switch to pipeline routing", hint: "mode", group: "Swarm", run: apply(() => setMode("pipeline")) },

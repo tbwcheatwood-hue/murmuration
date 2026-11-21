@@ -4,12 +4,23 @@ import { commitShard, mountModel, pullModel, activateBlueprint, refreshDiscovery
 import { cx, gb, hostName, vramOf } from "../lib/format";
 import { ExtensionManager } from "./ExtensionManager";
 import { FlowCatalog } from "./FlowStudio";
+import { IdeClients } from "./IdeClients";
 import type { SwarmNode } from "../types";
 
 export function Sidebar() {
   const activity = useSwarm((state) => state.activity);
   const title =
-    activity === "nodes" ? "LM Link" : activity === "models" ? "Model registry" : activity === "blueprints" ? "Blueprints" : activity === "flows" ? "Flows" : "Extensions";
+    activity === "nodes"
+      ? "LM Link"
+      : activity === "models"
+        ? "Model registry"
+        : activity === "blueprints"
+          ? "Blueprints"
+          : activity === "flows"
+            ? "Flows"
+            : activity === "clients"
+              ? "IDE"
+              : "Extensions";
   return (
     <aside className="flex w-[300px] shrink-0 flex-col border-r border-line bg-panel">
       <div className="flex h-9 items-center border-b border-line px-3 text-[11px] uppercase tracking-[0.14em] text-faint">{title}</div>
@@ -19,6 +30,7 @@ export function Sidebar() {
         {activity === "blueprints" && <BlueprintList />}
         {activity === "extensions" && <ExtensionManager />}
         {activity === "flows" && <FlowCatalog />}
+        {activity === "clients" && <IdeClients />}
       </div>
     </aside>
   );
