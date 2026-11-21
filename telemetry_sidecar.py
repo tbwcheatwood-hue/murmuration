@@ -61,6 +61,9 @@ def sample() -> dict:
     if not program:
         return empty
     try:
+        run_kwargs = {}
+        if os.name == "nt":
+            run_kwargs["creationflags"] = 0x08000000
         completed = subprocess.run(
             [
                 program,
@@ -71,6 +74,7 @@ def sample() -> dict:
             text=True,
             timeout=2,
             check=False,
+            **run_kwargs,
         )
     except (OSError, subprocess.TimeoutExpired):
         return empty

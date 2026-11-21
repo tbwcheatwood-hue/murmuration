@@ -347,7 +347,7 @@ pub fn mount_model(state: &mut AppState, model_id: &str, node_id: &str, invoke_l
             summary.push_str(". LM Link on a simulated peer cannot run lms load.");
         } else if node_id == "local" {
             if let Some(path) = path {
-                match std::process::Command::new("lms").args(["load", &path]).spawn() {
+                match crate::discovery::command("lms").args(["load", &path]).spawn() {
                     Ok(child) => summary.push_str(&format!(". lms load started (pid {}).", child.id())),
                     Err(err) => summary.push_str(&format!(". lms load was not started: {err}.")),
                 }

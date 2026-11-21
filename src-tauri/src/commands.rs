@@ -5,7 +5,6 @@ use crate::orchestrator::{self, TaskPlan};
 use crate::state::{assign_hardware, hardware_file_path, upsert_hardware, write_lock, HardwareEntry, InferenceParams, Shared, Snapshot, Transfer};
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::process::Command;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -280,7 +279,7 @@ fn set_exit_node(ip: Option<String>) -> Result<String, String> {
         }
         None => "--exit-node=".into(),
     };
-    let output = Command::new("tailscale").args(["set", &arg]).output().map_err(|err| format!("tailscale set failed: {err}"))?;
+    let output = discovery::command("tailscale").args(["set", &arg]).output().map_err(|err| format!("tailscale set failed: {err}"))?;
     if output.status.success() {
         Ok(format!("tailscale set {arg}"))
     } else {
@@ -358,7 +357,7 @@ pub fn apply_worktree(
     if let Some(parent_dir) = worktree.parent() {
         std::fs::create_dir_all(parent_dir).map_err(|err| err.to_string())?;
     }
-    let created = Command::new("git")
+    let created = discovery::command("git")
         .args(["worktree", "add", "-b", branch, &worktree.display().to_string()])
         .current_dir(&repo_path)
         .output()
@@ -373,7 +372,7 @@ pub fn apply_worktree(
         }
         std::fs::write(&dest, &file.contents).map_err(|err| err.to_string())?;
     }
-    let add = Command::new("git")
+    let add = discovery::command("git")
         .args(["add", "--"])
         .args(files.iter().map(|file| file.path.as_str()))
         .current_dir(&worktree)
@@ -382,7 +381,7 @@ pub fn apply_worktree(
     if !add.status.success() {
         return Err(String::from_utf8_lossy(&add.stderr).trim().to_string());
     }
-    let commit = Command::new("git")
+    let commit = discovery::command("git")
         .args(["commit", "-m", message])
         .current_dir(&worktree)
         .output()

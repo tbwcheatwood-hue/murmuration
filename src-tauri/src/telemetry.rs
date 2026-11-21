@@ -1,22 +1,50 @@
 use crate::discovery;
+use crate::discovery::NvidiaSample;
 use crate::orchestrator::{self, announce_transition};
-use crate::state::{now_iso, write_lock, AppState, Shared, SwarmNode};
+use crate::state::{now_iso, read_lock, write_lock, AppState, Shared, SwarmNode};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 pub fn spawn(handle: AppHandle, shared: Shared) {
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(1200));
-        let snap = {
-            let mut state = write_lock(&shared);
-            tick(&mut state);
-            state.snapshot()
-        };
-        let _ = handle.emit("swarm-tick", snap);
+    std::thread::spawn(move || {
+        let mut ticks_until_gpu = 1u32;
+        loop {
+            std::thread::sleep(Duration::from_millis(1200));
+            ticks_until_gpu = ticks_until_gpu.saturating_sub(1);
+            let gpu_sample = if ticks_until_gpu == 0 {
+                let sample = discovery::sample_nvidia();
+                let found = sample.as_ref().is_some_and(|item| !item.gpus.is_empty());
+                ticks_until_gpu = if found { 4 } else { 30 };
+                Some(sample.unwrap_or(NvidiaSample { gpus: Vec::new(), temp_c: None }))
+            } else {
+                None
+            };
+            let ping_target = {
+                let state = read_lock(&shared);
+                let peers: Vec<(String, String)> = state
+                    .nodes
+                    .iter()
+                    .filter(|node| !node.simulated && node.id != "local" && node.status != "offline" && !node.tailscale_ip.is_empty())
+                    .map(|node| (node.id.clone(), node.tailscale_ip.clone()))
+                    .collect();
+                if peers.is_empty() {
+                    None
+                } else {
+                    Some(peers[(state.tick as usize) % peers.len()].clone())
+                }
+            };
+            let ping = ping_target.and_then(|(id, ip)| discovery::ping_ms(&ip).map(|ms| (id, ms)));
+            let snap = {
+                let mut state = write_lock(&shared);
+                tick(&mut state, gpu_sample, ping);
+                state.snapshot()
+            };
+            let _ = handle.emit("swarm-tick", snap);
+        }
     });
 }
 
-fn tick(state: &mut AppState) {
+fn tick(state: &mut AppState, gpu_sample: Option<NvidiaSample>, ping: Option<(String, u32)>) {
     state.tick = state.tick.wrapping_add(1);
     if state.stress_ticks > 0 {
         state.stress_ticks -= 1;
@@ -34,43 +62,32 @@ fn tick(state: &mut AppState) {
         announce_transition(state, &id);
     }
 
-    if tick % 4 == 0 {
-        if let Some(sample) = discovery::sample_nvidia() {
-            if let Some(local) = state.node_mut("local") {
-                if !sample.gpus.is_empty() {
-                    local.gpus = sample.gpus;
-                    if let Some(temp) = sample.temp_c {
-                        local.thermal = if temp >= 90.0 {
-                            "throttling"
-                        } else if temp >= 75.0 {
-                            "hot"
-                        } else if temp >= 55.0 {
-                            "warm"
-                        } else {
-                            "cool"
-                        }
-                        .into();
+    if let Some(sample) = gpu_sample {
+        if let Some(local) = state.node_mut("local") {
+            if !sample.gpus.is_empty() {
+                local.gpus = sample.gpus;
+                if let Some(temp) = sample.temp_c {
+                    local.thermal = if temp >= 90.0 {
+                        "throttling"
+                    } else if temp >= 75.0 {
+                        "hot"
+                    } else if temp >= 55.0 {
+                        "warm"
+                    } else {
+                        "cool"
                     }
+                    .into();
                 }
             }
         }
     }
 
-    let peers: Vec<(String, String)> = state
-        .nodes
-        .iter()
-        .filter(|node| !node.simulated && node.id != "local" && node.status != "offline")
-        .map(|node| (node.id.clone(), node.tailscale_ip.clone()))
-        .collect();
-    if !peers.is_empty() {
-        let (id, ip) = &peers[(tick as usize) % peers.len()];
-        if let Some(ms) = discovery::ping_ms(ip) {
-            if let Some(node) = state.node_mut(id) {
-                node.ping_ms = ms;
-                node.ping_base = ms;
-                node.ping_misses = 0;
-                node.last_seen = now_iso();
-            }
+    if let Some((id, ms)) = ping {
+        if let Some(node) = state.node_mut(&id) {
+            node.ping_ms = ms;
+            node.ping_base = ms;
+            node.ping_misses = 0;
+            node.last_seen = now_iso();
         }
     }
 

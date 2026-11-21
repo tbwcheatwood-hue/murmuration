@@ -5,7 +5,7 @@ use axum::Json;
 use serde_json::{json, Value};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 pub async fn handle(shared: Shared, headers: HeaderMap, body: Value) -> Response {
@@ -273,14 +273,14 @@ fn resolve_under(root: &str, path: &str) -> Result<PathBuf, String> {
 
 fn run_shell(root: &str, command: &str) -> String {
     let child = if cfg!(windows) {
-        Command::new("cmd")
+        crate::discovery::command("cmd")
             .args(["/C", command])
             .current_dir(root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
     } else {
-        Command::new("sh")
+        crate::discovery::command("sh")
             .args(["-c", command])
             .current_dir(root)
             .stdout(Stdio::piped())

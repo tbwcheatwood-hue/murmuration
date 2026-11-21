@@ -34,6 +34,12 @@ pub struct NvidiaSample {
     pub temp_c: Option<f64>,
 }
 
+pub enum NvidiaStatus {
+    Sample(NvidiaSample),
+    Missing,
+    Unreadable(String),
+}
+
 pub fn probe() -> Probe {
     let mut notes = Vec::new();
     let mut local_ip = "127.0.0.1".to_string();
@@ -122,24 +128,36 @@ pub fn probe() -> Probe {
         }
     };
 
-    let nvidia = sample_nvidia();
-    let (local_gpus, local_thermal) = if let Some(sample) = nvidia {
-        notes.push(Note {
-            node_id: "local".into(),
-            source: "telemetry".into(),
-            level: "info".into(),
-            message: format!("nvidia-smi reported {} GPU(s).", sample.gpus.len()),
-        });
-        let thermal = sample.temp_c.map(|temp| thermal_from_temp(temp));
-        (Some(sample.gpus), thermal)
-    } else {
-        notes.push(Note {
-            node_id: "local".into(),
-            source: "telemetry".into(),
-            level: "info".into(),
-            message: "nvidia-smi is not available (PATH, System32, and NVSMI were checked). Local measured VRAM stays 0 until a probe or sidecar succeeds.".into(),
-        });
-        (None, None)
+    let (local_gpus, local_thermal) = match explain_nvidia() {
+        NvidiaStatus::Sample(sample) => {
+            let count = sample.gpus.len();
+            notes.push(Note {
+                node_id: "local".into(),
+                source: "telemetry".into(),
+                level: "info".into(),
+                message: format!("nvidia-smi reported {count} GPU(s)."),
+            });
+            let thermal = sample.temp_c.map(thermal_from_temp);
+            (Some(sample.gpus), thermal)
+        }
+        NvidiaStatus::Unreadable(detail) => {
+            notes.push(Note {
+                node_id: "local".into(),
+                source: "telemetry".into(),
+                level: "warn".into(),
+                message: format!("nvidia-smi ran and did not report VRAM. {detail} Local measured VRAM stays 0 until the GPU responds."),
+            });
+            (None, None)
+        }
+        NvidiaStatus::Missing => {
+            notes.push(Note {
+                node_id: "local".into(),
+                source: "telemetry".into(),
+                level: "info".into(),
+                message: "nvidia-smi is not available (PATH, System32, and NVSMI were checked). Local measured VRAM stays 0 until a probe or sidecar succeeds.".into(),
+            });
+            (None, None)
+        }
     };
 
     let mut scanned_models = scan_model_dirs();
@@ -260,6 +278,13 @@ pub fn apply(state: &mut AppState, probe: Probe) {
 }
 
 pub fn sample_nvidia() -> Option<NvidiaSample> {
+    match explain_nvidia() {
+        NvidiaStatus::Sample(sample) => Some(sample),
+        NvidiaStatus::Missing | NvidiaStatus::Unreadable(_) => None,
+    }
+}
+
+pub fn explain_nvidia() -> NvidiaStatus {
     let query = [
         "--query-gpu=name,memory.total,memory.free,utilization.gpu,temperature.gpu",
         "--format=csv,noheader,nounits",
@@ -270,14 +295,26 @@ pub fn sample_nvidia() -> Option<NvidiaSample> {
                 continue;
             }
         }
-        if let Some(raw) = capture(&program, &query, Duration::from_millis(1200)) {
-            let parsed = parse_nvidia_csv(&raw);
+        if let Some((stdout, stderr)) = capture_streams(&program, &query, Duration::from_millis(1200)) {
+            let parsed = parse_nvidia_csv(&stdout);
             if !parsed.gpus.is_empty() {
-                return Some(parsed);
+                return NvidiaStatus::Sample(parsed);
             }
+            let detail = first_line(&stdout).or_else(|| first_line(&stderr)).unwrap_or_else(|| "nvidia-smi returned no GPU rows.".into());
+            return NvidiaStatus::Unreadable(detail);
         }
     }
-    None
+    NvidiaStatus::Missing
+}
+
+fn first_line(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let mut line = line.to_string();
+    if line.len() > 180 {
+        line.truncate(177);
+        line.push_str("...");
+    }
+    Some(line)
 }
 
 pub fn nvidia_smi_candidates() -> Vec<String> {
@@ -1128,8 +1165,24 @@ fn port_open(ip: &str, port: u16) -> bool {
     std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(180)).is_ok()
 }
 
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW. The app is a GUI process, so a console child
+        // otherwise flashes a window on every nvidia-smi, lms, or ping call.
+        command.creation_flags(0x08000000);
+    }
+    command
+}
+
 fn capture(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
-    let mut child = Command::new(program)
+    capture_streams(program, args, timeout).map(|(stdout, _)| stdout)
+}
+
+fn capture_streams(program: &str, args: &[&str], timeout: Duration) -> Option<(String, String)> {
+    let mut child = command(program)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1140,10 +1193,14 @@ fn capture(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
         match child.try_wait() {
             Ok(Some(_)) => {
                 let mut out = String::new();
+                let mut err = String::new();
                 if let Some(mut stdout) = child.stdout.take() {
                     let _ = stdout.read_to_string(&mut out);
                 }
-                return Some(out);
+                if let Some(mut stderr) = child.stderr.take() {
+                    let _ = stderr.read_to_string(&mut err);
+                }
+                return Some((out, err));
             }
             Ok(None) => {
                 if start.elapsed() > timeout {
