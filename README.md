@@ -14,8 +14,8 @@ The studio is four zones.
 
 | Zone | What it shows |
 | --- | --- |
-| Left | LM Link devices, the model registry, swarm blueprints, and extensions |
-| Center | Topology, the workbench, and the traffic inspector |
+| Left | LM Link devices, the model registry, swarm blueprints, extensions, and the flow catalog |
+| Center | Topology, the workbench, the traffic inspector, and FOX chat |
 | Right | Decode settings and local MCP tools |
 | Bottom | Combined VRAM and logs from lms, the gateway, and discovery |
 
@@ -25,7 +25,25 @@ Each LM Link row shows whether the device is online, whether it is this computer
 
 The workbench takes one objective, splits it across roles, and keeps the resulting artifact editable. The traffic tab records the routing decision, time to first token, and whether the reply came from a live LM Studio or from the orchestrator brief.
 
-The command palette is Ctrl+K (Cmd+K on macOS). Ctrl+B toggles the sidebar, Ctrl+J toggles the log dock, and Ctrl+1, Ctrl+2, and Ctrl+3 switch the center tabs.
+The command palette is Ctrl+K (Cmd+K on macOS). Ctrl+B toggles the sidebar, Ctrl+J toggles the log dock, and Ctrl+1 through Ctrl+4 switch the center tabs. Ctrl+4 opens FOX.
+
+## FOX chat
+
+FOX is the advisor on the fourth center tab. Chat input and chat output are canvas nodes. Send writes the reply into chat output. LM Studio at `http://127.0.0.1:1234/v1` is the runtime that loads and serves the model. FOX does not start another server and does not switch the loaded model.
+
+Safe, Power, and Vision only change the system prompt. Temperature and the token cap are on the node. The nine tool chips name which T.I.M. tools the prompt may mention. Running a tool is still a separate click on the tool card, and the Windows shell, HTTP fetch, and MCP bridge stay off until you approve that run.
+
+A reasoning model can leave the visible `content` field empty and put the reply in `reasoning_content`. Murmuration shows that text as the chat output. A long reply waits up to 180 seconds plus a quarter of the token cap, and never longer than 10 minutes.
+
+![FOX tab with chat input, Safe profile, and the tool chips](docs/images/fox-chat.png)
+
+## Imported flows
+
+The Flows activity opens the catalog beside the FOX tab. Langflow and Flowise starters ship in the app. The n8n list is an index; opening an entry fetches that workflow from the allowlisted raw GitHub URL. You can also paste an export. Credentials in the JSON are dropped and called out. The conversion is structural: chat inputs and chat outputs become the FOX nodes, and brain or tool edges are not invented.
+
+The shell tool runs `cmd.exe` in the workspace, with no console window, and stops after 20 seconds. Paths stay under the workspace. SQLite is one read-only `SELECT`. Agent memory is a JSON file under `%LOCALAPPDATA%\Murmuration`.
+
+![Flow catalog with Langflow starters and the FOX tab](docs/images/flows.png)
 
 ## Run it
 
@@ -152,16 +170,17 @@ A tiny WebAssembly probe in the extensions panel reports its module name. It doe
 
 ```text
 src/                  React studio
-  components/         Activity bar, LM Link list, topology, workbench, inspector
-  lib/                Browser-side mesh, fit math, gateway client
-src-tauri/src/        Discovery, telemetry, fit, orchestrator, gateway, MCP
+  components/         Activity bar, LM Link list, topology, workbench, FOX, inspector
+  lib/                Browser-side mesh, fit math, gateway client, T.I.M. converters
+catalogs/             Langflow and Flowise starters, plus the n8n index
+src-tauri/src/        Discovery, telemetry, fit, orchestrator, gateway, MCP, FOX, tools
 extensions/           SwarmPlugin manifests
 docs/images/          README screenshots
 telemetry_sidecar.py  Zero-dependency GPU metrics server
 mesh.manifest.example.json
 ```
 
-Rust tests cover LM Link filtering, the three VRAM tiers, nvidia-smi path lookup, the metrics JSON shape, synthetic stress without a GPU sample, and saving hardware by device name so search can find the CPU, GPU, RAM, and VRAM. Unrelated model records stay.
+Rust tests cover LM Link filtering, the three VRAM tiers, nvidia-smi path lookup, the metrics JSON shape, synthetic stress without a GPU sample, saving hardware by device name, FOX replies that arrive as reasoning text, and the GitHub allowlist for imported workflows. Unrelated model records stay.
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml
@@ -172,4 +191,6 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - It does not download weights or call `lms load` unless you mount a real local file and the command is allowed to run.
 - It does not split tensors across the network unless the shard backend URL is set.
 - It does not change Tailscale exit nodes unless you confirm that action.
-- The browser preview is not a second source of devices. It waits for the desktop shell.
+- The browser preview is not a second source of devices. It waits for the desktop shell. FOX chat in that preview says it runs in the desktop app.
+- FOX does not load a model, and it does not talk to KoboldCpp or a llamafile. LM Studio on port 1234 does the serving.
+- Imported graphs do not replay the original Langflow, Flowise, or n8n runtime. They become nodes you can edit and send through LM Studio.

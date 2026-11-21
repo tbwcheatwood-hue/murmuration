@@ -15,7 +15,7 @@ pub struct FoxStatus {
 }
 
 pub async fn status() -> FoxStatus {
-    let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(3)).build() {
+    let client = match reqwest::Client::builder().no_proxy().timeout(std::time::Duration::from_secs(3)).build() {
         Ok(client) => client,
         Err(err) => {
             return FoxStatus {
@@ -70,8 +70,11 @@ pub async fn chat(prompt: &str, model: &str, temperature: f64, max_tokens: u32, 
     if prompt.is_empty() {
         return Err("Chat input is empty.".into());
     }
+    let wait = (180 + max_tokens as u64 / 4).clamp(180, 600);
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(120))
+        .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(wait))
         .build()
         .map_err(|err| err.to_string())?;
     let model = if model.trim().is_empty() {
@@ -108,20 +111,35 @@ pub async fn chat(prompt: &str, model: &str, temperature: f64, max_tokens: u32, 
         .json(&body)
         .send()
         .await
-        .map_err(|err| format!("LM Studio did not accept the chat. {err}"))?;
+        .map_err(|err| format!("LM Studio did not accept the chat. {}", explain(&err)))?;
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         return Err(format!("LM Studio chat returned HTTP {status}. {}", clip(&text, 400)));
     }
     let payload: Value = response.json().await.map_err(|err| err.to_string())?;
-    payload
-        .pointer("/choices/0/message/content")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| "LM Studio returned a chat completion without message text.".into())
+    assistant_text(&payload).ok_or_else(|| "LM Studio returned a chat completion without message text.".into())
+}
+
+fn assistant_text(payload: &Value) -> Option<String> {
+    let message = payload.pointer("/choices/0/message")?;
+    let content = message.get("content").and_then(|value| value.as_str()).unwrap_or("").trim();
+    if !content.is_empty() {
+        return Some(content.to_string());
+    }
+    let reasoning = message.get("reasoning_content").and_then(|value| value.as_str()).unwrap_or("").trim();
+    if reasoning.is_empty() { None } else { Some(reasoning.to_string()) }
+}
+
+fn explain(err: &reqwest::Error) -> String {
+    let mut detail = err.to_string();
+    let mut source = std::error::Error::source(err);
+    while let Some(next) = source {
+        detail.push_str(": ");
+        detail.push_str(&next.to_string());
+        source = std::error::Error::source(next);
+    }
+    detail
 }
 
 fn clip(value: &str, max: usize) -> String {
@@ -148,6 +166,16 @@ pub async fn fox_chat(prompt: String, model: String, temperature: f64, max_token
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_models_still_produce_chat_output() {
+        let payload = json!({
+            "choices": [{
+                "message": { "content": "", "reasoning_content": "Hello from the loaded model." }
+            }]
+        });
+        assert_eq!(assistant_text(&payload).as_deref(), Some("Hello from the loaded model."));
+    }
 
     #[test]
     fn fox_chat_endpoint_is_lm_studio() {

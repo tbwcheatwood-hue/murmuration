@@ -40,9 +40,9 @@ export function FlowCatalog() {
   const [query, setQuery] = useState("");
   const [platform, setPlatform] = useState<"all" | "langflow" | "flowise" | "n8n">("all");
   const [busy, setBusy] = useState(false);
-  const bundled = useMemo(() => bundledFlows(), []);
-  const localN8n = useMemo(() => bundledN8n(), []);
   const needle = query.trim().toLowerCase();
+  const bundled = useMemo(() => bundledFlows(), []);
+  const localN8n = useMemo(() => (platform === "n8n" || needle.length > 0 ? bundledN8n() : []), [platform, needle]);
   const visibleBundled = bundled.filter((flow) => (platform === "all" || flow.platform === platform) && flow.name.toLowerCase().includes(needle));
   const remoteMatches = [...localN8n, ...remote.filter((hit) => !localN8n.some((item) => item.rawUrl === hit.rawUrl))].filter(
     (hit) => (platform === "all" || hit.platform === platform) && hit.name.toLowerCase().includes(needle),
@@ -150,7 +150,8 @@ export function FlowStudio() {
   const [output, setOutput] = useState("");
   const [running, setRunning] = useState(false);
   const converted = useConverted(selection, pasted);
-  const modelNames = useSwarm((state) => state.snapshot.models.map((model) => model.name));
+  const models = useSwarm((state) => state.snapshot.models);
+  const modelNames = models.map((model) => model.name);
   const [graphNodes, setGraphNodes] = useState<GraphNode[]>(() => [createNode("chat_in", { x: 40, y: 40 }), createNode("chat_out", { x: 40, y: 220 })]);
   const preset = TOOL_CATALOG.find((item) => item.id === server);
 

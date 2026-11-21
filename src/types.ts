@@ -180,4 +180,4 @@ export interface TaskPlan {
 }
 
 export type Activity = "nodes" | "models" | "blueprints" | "extensions" | "flows";
-export type WorkspaceTab = "topology" | "workbench" | "traffic";
+export type WorkspaceTab = "topology" | "workbench" | "traffic" | "chat";

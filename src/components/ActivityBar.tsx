@@ -29,6 +29,7 @@ export function ActivityBar() {
               if (activity === item.id && sidebarOpen) useSwarm.getState().toggleSidebar();
               else {
                 setActivity(item.id);
+                if (item.id === "flows") useSwarm.getState().setTab("chat");
                 if (!sidebarOpen) useSwarm.getState().toggleSidebar();
               }
             }}

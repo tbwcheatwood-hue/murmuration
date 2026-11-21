@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import { ActivityBar } from "./components/ActivityBar";
 import { BottomDock } from "./components/BottomDock";
 import { CenterCanvas } from "./components/CenterCanvas";
-import { FlowStudio } from "./components/FlowStudio";
 import { CommandPalette } from "./components/CommandPalette";
 import { Inspector } from "./components/Inspector";
 import { Sidebar } from "./components/Sidebar";
@@ -18,7 +17,6 @@ export default function App() {
   const inspectorOpen = useSwarm((state) => state.inspectorOpen);
   const bottomOpen = useSwarm((state) => state.bottomOpen);
   const toasts = useSwarm((state) => state.toasts);
-  const activity = useSwarm((state) => state.activity);
 
   useEffect(() => {
     let stop = () => {};
@@ -66,6 +64,8 @@ export default function App() {
         ui.setTab("workbench");
       } else if (key === "3") {
         ui.setTab("traffic");
+      } else if (key === "4") {
+        ui.setTab("chat");
       } else if (key === "enter" && ui.tab === "workbench") {
         event.preventDefault();
         void runObjective();
@@ -86,7 +86,7 @@ export default function App() {
       <div className="flex min-h-0 flex-1">
         <ActivityBar />
         {sidebarOpen && <Sidebar />}
-        {activity === "flows" ? <FlowStudio /> : <CenterCanvas />}
+        <CenterCanvas />
         {inspectorOpen && <Inspector />}
       </div>
       <BottomDock collapsed={!bottomOpen} />

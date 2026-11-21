@@ -31,6 +31,7 @@ export function CommandPalette() {
       { id: "topology", title: "Show topology", hint: "Ctrl+1", group: "View", run: () => useSwarm.getState().setTab("topology") },
       { id: "workbench", title: "Show workbench", hint: "Ctrl+2", group: "View", run: () => useSwarm.getState().setTab("workbench") },
       { id: "traffic", title: "Show traffic inspector", hint: "Ctrl+3", group: "View", run: () => useSwarm.getState().setTab("traffic") },
+      { id: "fox", title: "Show FOX chat", hint: "Ctrl+4", group: "View", run: () => useSwarm.getState().setTab("chat") },
       { id: "run", title: "Run the current objective", hint: "Ctrl+Enter", group: "Swarm", run: () => void runObjective() },
       { id: "rebalance", title: "Rebalance roles by VRAM", hint: "orchestrator", group: "Swarm", run: apply(() => rebalance()) },
       { id: "pipeline", title: "Switch to pipeline routing", hint: "mode", group: "Swarm", run: apply(() => setMode("pipeline")) },

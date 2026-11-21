@@ -1,5 +1,6 @@
 import { useSwarm } from "../store";
 import { cx } from "../lib/format";
+import { FlowStudio } from "./FlowStudio";
 import { TopologyView } from "./TopologyView";
 import { TrafficView } from "./TrafficView";
 import { Workbench } from "./Workbench";
@@ -9,6 +10,7 @@ const tabs: { id: WorkspaceTab; label: string; key: string }[] = [
   { id: "topology", label: "Topology", key: "1" },
   { id: "workbench", label: "Workbench", key: "2" },
   { id: "traffic", label: "Traffic", key: "3" },
+  { id: "chat", label: "FOX", key: "4" },
 ];
 
 export function CenterCanvas() {
@@ -36,6 +38,9 @@ export function CenterCanvas() {
         </div>
         <div className={cx("absolute inset-0", tab === "traffic" ? "" : "hidden")}>
           <TrafficView />
+        </div>
+        <div className={cx("absolute inset-0 overflow-auto", tab === "chat" ? "" : "hidden")}>
+          <FlowStudio />
         </div>
       </div>
     </section>
