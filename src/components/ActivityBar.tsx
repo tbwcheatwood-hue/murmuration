@@ -1,4 +1,4 @@
-import { Boxes, Network, PanelBottom, PanelRight, Puzzle, Workflow } from "lucide-react";
+import { Boxes, Network, PanelBottom, PanelRight, Puzzle, Spline, Workflow } from "lucide-react";
 import { useSwarm } from "../store";
 import type { Activity } from "../types";
 import { cx } from "../lib/format";
@@ -8,6 +8,7 @@ const items: { id: Activity; icon: typeof Network; label: string }[] = [
   { id: "models", icon: Boxes, label: "Model registry" },
   { id: "blueprints", icon: Workflow, label: "Blueprints" },
   { id: "extensions", icon: Puzzle, label: "Extensions" },
+  { id: "flows", icon: Spline, label: "Flows" },
 ];
 
 export function ActivityBar() {

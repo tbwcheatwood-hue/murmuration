@@ -3,11 +3,13 @@ import { useSwarm } from "../store";
 import { commitShard, mountModel, pullModel, activateBlueprint, refreshDiscovery, inTauri } from "../lib/actions";
 import { cx, gb, hostName, vramOf } from "../lib/format";
 import { ExtensionManager } from "./ExtensionManager";
+import { FlowCatalog } from "./FlowStudio";
 import type { SwarmNode } from "../types";
 
 export function Sidebar() {
   const activity = useSwarm((state) => state.activity);
-  const title = activity === "nodes" ? "LM Link" : activity === "models" ? "Model registry" : activity === "blueprints" ? "Blueprints" : "Extensions";
+  const title =
+    activity === "nodes" ? "LM Link" : activity === "models" ? "Model registry" : activity === "blueprints" ? "Blueprints" : activity === "flows" ? "Flows" : "Extensions";
   return (
     <aside className="flex w-[300px] shrink-0 flex-col border-r border-line bg-panel">
       <div className="flex h-9 items-center border-b border-line px-3 text-[11px] uppercase tracking-[0.14em] text-faint">{title}</div>
@@ -16,6 +18,7 @@ export function Sidebar() {
         {activity === "models" && <ModelRegistry />}
         {activity === "blueprints" && <BlueprintList />}
         {activity === "extensions" && <ExtensionManager />}
+        {activity === "flows" && <FlowCatalog />}
       </div>
     </aside>
   );

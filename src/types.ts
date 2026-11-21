@@ -179,5 +179,5 @@ export interface TaskPlan {
   combinedPreview: string;
 }
 
-export type Activity = "nodes" | "models" | "blueprints" | "extensions";
+export type Activity = "nodes" | "models" | "blueprints" | "extensions" | "flows";
 export type WorkspaceTab = "topology" | "workbench" | "traffic";

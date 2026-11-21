@@ -1,11 +1,13 @@
 mod commands;
 mod discovery;
 mod fit;
+mod fox;
 mod gateway;
 mod mcp;
 mod orchestrator;
 mod state;
 mod telemetry;
+mod tim;
 
 use tauri::Emitter;
 
@@ -52,7 +54,12 @@ pub fn run() {
             commands::set_inference_active,
             commands::apply_exit_node,
             commands::set_tool_policy,
-            commands::git_worktree_apply
+            commands::git_worktree_apply,
+            tim::tim_list_catalog,
+            tim::tim_fetch_workflow,
+            tim::tim_run_tool,
+            fox::fox_status,
+            fox::fox_chat
         ])
         .run(tauri::generate_context!())
         .expect("error while running Murmuration");

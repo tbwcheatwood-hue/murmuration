@@ -1,3 +1,4 @@
+import type { CatalogHit } from "./tim/types";
 import type { FitResult, InferenceParams, Snapshot, TaskPlan } from "../types";
 import { browser, currentMesh, previewTraffic } from "./mesh";
 
@@ -132,4 +133,31 @@ export async function gitWorktreeApply(repo: string, branch: string, files: { pa
     return lines.join("\n");
   }
   return call("git_worktree_apply", { repo, branch, files, message, confirm });
+}
+
+export async function listFlowCatalog(platform: string): Promise<CatalogHit[]> {
+  if (!inTauri()) throw new Error("Live catalog pull runs in the desktop app.");
+  return call("tim_list_catalog", { platform });
+}
+
+export async function fetchFlowWorkflow(rawUrl: string): Promise<string> {
+  if (!inTauri()) throw new Error("Remote workflow download runs in the desktop app.");
+  return call("tim_fetch_workflow", { rawUrl });
+}
+
+export type FoxStatus = { manager: string; endpoint: string; online: boolean; models: string[]; message: string };
+
+export async function foxStatus(): Promise<FoxStatus> {
+  if (!inTauri()) return { manager: "lmstudio", endpoint: "http://127.0.0.1:1234/v1", online: false, models: [], message: "FOX status runs in the desktop app." };
+  return call("fox_status");
+}
+
+export async function foxChat(prompt: string, model: string, temperature: number, maxTokens: number, profile: string, tools: string[]): Promise<string> {
+  if (!inTauri()) throw new Error("FOX chat runs in the desktop app, through LM Studio.");
+  return call("fox_chat", { prompt, model, temperature, maxTokens, profile, tools });
+}
+
+export async function runCanvasTool(server: string, args: Record<string, unknown>, workspace: string, approved: boolean): Promise<string> {
+  if (!inTauri()) throw new Error("Canvas tools run in the desktop app.");
+  return call("tim_run_tool", { server, args, workspace, approved });
 }
