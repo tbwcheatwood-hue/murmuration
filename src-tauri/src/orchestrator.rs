@@ -16,6 +16,8 @@ pub struct RouteDecision {
     pub reason: String,
     pub failover_from: Option<String>,
     pub proxy_url: Option<String>,
+    pub alt_proxy_url: Option<String>,
+    pub alt_hostname: Option<String>,
     pub upstream: String,
 }
 
@@ -61,7 +63,7 @@ fn capacity_order(a: &SwarmNode, b: &SwarmNode) -> std::cmp::Ordering {
 
 pub fn route(state: &AppState, requested_model: Option<&str>) -> RouteDecision {
     let mut eligible: Vec<&SwarmNode> = state.nodes.iter().filter(|node| healthy(node) && total_vram(node) > 0.0).collect();
-    eligible.sort_by(|a, b| capacity_order(a, b));
+    eligible.sort_by(|a, b| route_cmp(state, a, b));
 
     let model_name = |id: &str| {
         state
@@ -85,42 +87,82 @@ pub fn route(state: &AppState, requested_model: Option<&str>) -> RouteDecision {
             reason: "No online node has measured, configured, or model-inferred VRAM. The gateway will answer with an orchestrator brief.".into(),
             failover_from: down_hostname(state),
             proxy_url: None,
+            alt_proxy_url: None,
+            alt_hostname: None,
             upstream: "brief".into(),
         };
     }
 
     let mode = state.mode.as_str();
-    let (primary, failover_from) = pick_primary(state, &eligible);
+    let skipped: Vec<String> = eligible
+        .iter()
+        .filter(|node| proxy_for(state, node).is_none())
+        .map(|node| node.hostname.clone())
+        .collect();
+    let reachable: Vec<&SwarmNode> = eligible.iter().copied().filter(|node| proxy_for(state, node).is_some()).collect();
+    let backend = shard_backend_url(state, mode);
+    let (primary, mut failover_from) = if reachable.is_empty() {
+        pick_primary(state, &eligible)
+    } else {
+        pick_primary(state, &reachable)
+    };
+    if failover_from.is_none() && !skipped.is_empty() && !reachable.is_empty() {
+        failover_from = Some(skipped.join(", "));
+    }
+    let alt = reachable.iter().find(|node| node.id != primary.id);
+    let direct = proxy_for(state, primary);
+    let proxy_url = direct.or(backend.clone());
+    let upstream = if proxy_url.is_some() { "live" } else { "brief" };
     let draft = if mode == "speculative" || state.params.speculative {
         eligible.iter().rev().find(|node| node.id != primary.id).copied()
     } else {
         None
     };
-
     let shard_nodes = if mode == "shard" {
         eligible.iter().map(|node| node.id.clone()).collect()
     } else {
         Vec::new()
     };
 
-    let direct = proxy_for(state, primary);
-    let backend = shard_backend_url(state, mode);
-    let proxy_url = direct.or(backend);
-    let upstream = if proxy_url.is_some() { "live" } else { "brief" };
-
+    let speed = if primary.tokens_per_sec > 0.0 {
+        format!("{:.0} tok/s observed", primary.tokens_per_sec)
+    } else {
+        "no measured speed yet".into()
+    };
+    let context = if context_fits(state, primary) {
+        format!("context setting {} fits", state.params.context_length)
+    } else {
+        format!("context setting {} is above the loaded model", state.params.context_length)
+    };
     let mut reason = match mode {
         "shard" => format!(
-            "Layer shard across {} healthy nodes. Tensor RPC is used only when a shard backend URL is set.",
+            "Chose {} ({:.1} GB free, {speed}, {context}). Layer plan covers {} healthy nodes. Tensor RPC is used only when a shard backend URL is set.",
+            primary.hostname,
+            free_gb(primary),
             eligible.len()
         ),
-        "speculative" => "Draft node proposes tokens. The target node is the OpenAI response.".into(),
-        _ => "Pipeline routes the request to the architect role, then the workbench fans the brief out to the other roles.".into(),
+        "speculative" => format!(
+            "Chose {} ({:.1} GB free, {speed}, {context}). The draft label is advisory. One request is sent.",
+            primary.hostname,
+            free_gb(primary)
+        ),
+        _ => format!(
+            "Chose {} ({:.1} GB free, {speed}, {context}).",
+            primary.hostname,
+            free_gb(primary)
+        ),
     };
     if let Some(from) = &failover_from {
-        reason = format!("Failover from {from}. {reason}");
+        reason = format!("Skipped {from}. {reason}");
     }
-    if mode == "shard" && proxy_url.is_none() {
-        reason.push_str(" No llama.cpp RPC backend is configured, so this response is the shard plan rather than split weights.");
+    if !skipped.is_empty() && !reachable.is_empty() && failover_from.as_deref() != Some(skipped.join(", ").as_str()) {
+        reason.push_str(&format!(" Also skipped {}: no reachable LM Studio.", skipped.join(", ")));
+    }
+    if mode == "shard" && backend.is_none() {
+        reason.push_str(" No llama.cpp RPC backend is configured, so a shard request is a placement plan unless a reachable LM Studio answers it.");
+    }
+    if proxy_url.is_none() {
+        reason.push_str(" No reachable LM Studio, so this response is the orchestrator plan.");
     }
 
     RouteDecision {
@@ -135,8 +177,39 @@ pub fn route(state: &AppState, requested_model: Option<&str>) -> RouteDecision {
         reason,
         failover_from,
         proxy_url,
+        alt_proxy_url: alt.and_then(|node| proxy_for(state, node)),
+        alt_hostname: alt.map(|node| node.hostname.clone()),
         upstream: upstream.into(),
     }
+}
+
+fn free_gb(node: &SwarmNode) -> f64 {
+    let (total, allocated) = node_vram(node);
+    if total > 0.0 {
+        (total - allocated).max(0.0)
+    } else {
+        vram_rank(node).0
+    }
+}
+
+fn context_fits(state: &AppState, node: &SwarmNode) -> bool {
+    let needed = state.params.context_length;
+    let limits: Vec<u32> = state
+        .models
+        .iter()
+        .filter(|model| model.loaded && model.context_max > 0 && (model.host_node_id == node.id || model.shard_nodes.iter().any(|id| id == &node.id)))
+        .map(|model| model.context_max)
+        .collect();
+    limits.is_empty() || limits.iter().any(|max| *max >= needed)
+}
+
+fn route_cmp(state: &AppState, a: &SwarmNode, b: &SwarmNode) -> std::cmp::Ordering {
+    context_fits(state, b)
+        .cmp(&context_fits(state, a))
+        .then_with(|| free_gb(b).total_cmp(&free_gb(a)))
+        .then_with(|| b.tokens_per_sec.total_cmp(&a.tokens_per_sec))
+        .then(a.ping_ms.cmp(&b.ping_ms))
+        .then(a.hostname.cmp(&b.hostname))
 }
 
 fn shard_backend_url(state: &AppState, mode: &str) -> Option<String> {
@@ -149,12 +222,15 @@ fn shard_backend_url(state: &AppState, mode: &str) -> Option<String> {
 }
 
 fn proxy_for(state: &AppState, node: &SwarmNode) -> Option<String> {
+    let _ = state;
     if node.simulated || !node.upstream_alive {
         return None;
     }
     let port = node.lm_link_port.unwrap_or(1234);
     let ip = if node.id == "local" { "127.0.0.1" } else { node.tailscale_ip.as_str() };
-    let _ = state;
+    if ip.is_empty() {
+        return None;
+    }
     Some(format!("http://{ip}:{port}/v1/chat/completions"))
 }
 
@@ -167,20 +243,11 @@ fn down_hostname(state: &AppState) -> Option<String> {
 }
 
 fn pick_primary<'a>(state: &AppState, eligible: &'a [&'a SwarmNode]) -> (&'a SwarmNode, Option<String>) {
-    if state.mode == "shard" {
-        return (eligible[0], None);
-    }
-    if state.mode == "speculative" || state.params.speculative {
-        return (eligible[0], None);
-    }
-    if let Some(architect) = eligible.iter().copied().find(|node| node.role.as_deref() == Some("architect")) {
-        return (architect, None);
-    }
-    let missing = state
-        .nodes
-        .iter()
-        .find(|node| node.role.as_deref() == Some("architect") && !healthy(node))
-        .map(|node| node.hostname.clone());
+    let missing = if state.mode == "shard" || state.mode == "speculative" || state.params.speculative {
+        None
+    } else {
+        down_hostname(state)
+    };
     (eligible[0], missing)
 }
 
@@ -326,40 +393,52 @@ pub fn mount_model(state: &mut AppState, model_id: &str, node_id: &str, invoke_l
         ));
     }
 
+    let path = state
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .and_then(|model| model.path.clone());
+    let name = state.models.iter().find(|model| model.id == model_id).map(|model| model.name.clone()).unwrap_or_default();
+    let mut started = !invoke_lms;
+    let note = if !invoke_lms {
+        " lms load was not called.".to_string()
+    } else if simulated {
+        " LM Link on a simulated peer cannot run lms load.".to_string()
+    } else if node_id != "local" {
+        " Remote lms load is not invoked from this machine.".to_string()
+    } else if let Some(path) = path {
+        match crate::discovery::command("lms").args(["load", &path]).spawn() {
+            Ok(child) => {
+                started = true;
+                format!(" lms load started (pid {}).", child.id())
+            }
+            Err(err) => format!(" lms load was not started: {err}."),
+        }
+    } else {
+        " No on-disk path is known, so lms load was not called.".to_string()
+    };
+    if !started {
+        let summary = format!("{name} was not loaded on {host_name}.{note}");
+        state.log(node_id, "lms", "warn", summary.clone());
+        return Ok(summary);
+    }
     if let Some(node) = state.node_mut(node_id) {
         if let Some(gpu) = node.gpus.first_mut() {
             gpu.vram_allocated_gb = (gpu.vram_allocated_gb + size).min(gpu.vram_total_gb);
         }
         node.token_base = node.token_base.max(20.0);
     }
-    let path = {
-        let model = state.model_mut(model_id).ok_or_else(|| format!("Unknown model {model_id}"))?;
+    if let Some(model) = state.model_mut(model_id) {
         model.loaded = true;
         model.sharded = false;
         model.shard_nodes.clear();
         model.host_node_id = node_id.to_string();
-        model.path.clone()
-    };
-    let name = state.models.iter().find(|model| model.id == model_id).map(|model| model.name.clone()).unwrap_or_default();
-    let mut summary = format!("Reserved {name} on {host_name}");
-    if invoke_lms {
-        if simulated {
-            summary.push_str(". LM Link on a simulated peer cannot run lms load.");
-        } else if node_id == "local" {
-            if let Some(path) = path {
-                match crate::discovery::command("lms").args(["load", &path]).spawn() {
-                    Ok(child) => summary.push_str(&format!(". lms load started (pid {}).", child.id())),
-                    Err(err) => summary.push_str(&format!(". lms load was not started: {err}.")),
-                }
-            } else {
-                summary.push_str(". No on-disk path is known, so lms load was not called.");
-            }
-        } else {
-            summary.push_str(". Remote lms load is not invoked from this machine.");
-        }
-    } else {
-        summary.push_str(". lms load was not called.");
     }
+    let summary = if invoke_lms {
+        format!("Loaded {name} on {host_name}.{note}")
+    } else {
+        format!("Reserved {name} on {host_name}.{note}")
+    };
     state.log(node_id, "lms", "info", summary.clone());
     Ok(summary)
 }
@@ -601,5 +680,132 @@ mod tests {
         let architect = state.nodes.iter().find(|node| node.role.as_deref() == Some("architect")).unwrap();
         assert_eq!(architect.hostname, "Measured");
         assert_eq!(architect.vram_source, "measured");
+    }
+
+    fn sample_model(id: &str, context: u32) -> crate::state::ModelArtifact {
+        crate::state::ModelArtifact {
+            id: id.into(),
+            name: id.into(),
+            format: "gguf".into(),
+            quant: "q8".into(),
+            size_gb: 4.0,
+            params_b: 8.0,
+            host_node_id: "local".into(),
+            architecture: "local".into(),
+            context_max: context,
+            layers: 32,
+            kv_heads: 8,
+            head_dim: 128,
+            loaded: false,
+            simulated: false,
+            sharded: false,
+            shard_nodes: Vec::new(),
+            path: Some("C:/models/sample.gguf".into()),
+        }
+    }
+
+    #[test]
+    fn an_unreachable_peer_cannot_displace_a_live_local_model() {
+        let mut state = AppState::boot();
+        let mut local = crate::state::bare_node("local", "FamilyRoom");
+        local.inferred_vram_gb = 8.0;
+        local.upstream_alive = true;
+        refresh_vram_fields(&mut local);
+        let mut peer = crate::state::bare_node("lm-game", "GamingPC");
+        peer.inferred_vram_gb = 24.0;
+        refresh_vram_fields(&mut peer);
+        state.nodes = vec![peer, local];
+        let decision = route(&state, Some("murmuration"));
+        assert_eq!(decision.primary_hostname, "FamilyRoom");
+        assert_eq!(decision.upstream, "live");
+        assert!(decision.proxy_url.unwrap().contains("127.0.0.1"));
+        assert!(decision.reason.contains("GamingPC"));
+    }
+
+    #[test]
+    fn more_free_memory_wins_when_both_nodes_can_answer() {
+        let mut state = AppState::boot();
+        let mut busy = crate::state::bare_node("local", "FamilyRoom");
+        busy.upstream_alive = true;
+        busy.tokens_per_sec = 12.0;
+        busy.gpus.push(crate::state::GpuMetric {
+            name: "local".into(),
+            vram_total_gb: 24.0,
+            vram_allocated_gb: 22.0,
+            utilization: 1.0,
+        });
+        refresh_vram_fields(&mut busy);
+        let mut open = crate::state::bare_node("lm-game", "GamingPC");
+        open.upstream_alive = true;
+        open.tailscale_ip = "100.1.1.1".into();
+        open.tokens_per_sec = 12.0;
+        open.gpus.push(crate::state::GpuMetric {
+            name: "peer".into(),
+            vram_total_gb: 16.0,
+            vram_allocated_gb: 1.0,
+            utilization: 1.0,
+        });
+        refresh_vram_fields(&mut open);
+        state.nodes = vec![busy, open];
+        let decision = route(&state, None);
+        assert_eq!(decision.primary_hostname, "GamingPC");
+        assert!(decision.alt_proxy_url.unwrap().contains("127.0.0.1"));
+    }
+
+    #[test]
+    fn a_loaded_model_that_fits_context_outranks_a_larger_free_pool() {
+        let mut state = AppState::boot();
+        state.params.context_length = 8192;
+        let mut tight = crate::state::bare_node("local", "FamilyRoom");
+        tight.upstream_alive = true;
+        tight.gpus.push(crate::state::GpuMetric {
+            name: "local".into(),
+            vram_total_gb: 12.0,
+            vram_allocated_gb: 8.0,
+            utilization: 1.0,
+        });
+        refresh_vram_fields(&mut tight);
+        let mut roomy = crate::state::bare_node("lm-game", "GamingPC");
+        roomy.upstream_alive = true;
+        roomy.tailscale_ip = "100.1.1.1".into();
+        roomy.gpus.push(crate::state::GpuMetric {
+            name: "peer".into(),
+            vram_total_gb: 48.0,
+            vram_allocated_gb: 1.0,
+            utilization: 1.0,
+        });
+        refresh_vram_fields(&mut roomy);
+        let mut fits = sample_model("fits", 16384);
+        fits.loaded = true;
+        fits.host_node_id = "local".into();
+        let mut short = sample_model("short", 2048);
+        short.loaded = true;
+        short.host_node_id = "lm-game".into();
+        state.nodes = vec![roomy, tight];
+        state.models = vec![fits, short];
+        let decision = route(&state, None);
+        assert_eq!(decision.primary_hostname, "FamilyRoom");
+        assert!(decision.reason.contains("8192"));
+    }
+
+    #[test]
+    fn remote_lms_load_does_not_mark_the_model_loaded() {
+        let mut state = AppState::boot();
+        let mut peer = crate::state::bare_node("lm-game", "GamingPC");
+        peer.gpus.push(crate::state::GpuMetric {
+            name: "peer".into(),
+            vram_total_gb: 24.0,
+            vram_allocated_gb: 0.0,
+            utilization: 0.0,
+        });
+        state.nodes = vec![peer];
+        state.models = vec![sample_model("qwen", 8192)];
+        let summary = mount_model(&mut state, "qwen", "lm-game", true).unwrap();
+        assert!(!state.models[0].loaded);
+        assert!(summary.contains("was not loaded"));
+        assert_eq!(state.nodes[0].gpus[0].vram_allocated_gb, 0.0);
+        mount_model(&mut state, "qwen", "lm-game", false).unwrap();
+        assert!(state.models[0].loaded);
+        assert!(state.nodes[0].gpus[0].vram_allocated_gb > 0.0);
     }
 }

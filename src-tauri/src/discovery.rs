@@ -1247,6 +1247,32 @@ struct TsPeer {
 mod tests {
     use super::*;
 
+    struct EnvVar {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVar {
+        fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: this test is the only reader of these keys, and Drop restores them before the test returns.
+            unsafe { std::env::set_var(key, value); }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            // SAFETY: restores the process environment this test changed.
+            unsafe {
+                match &self.previous {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
     #[test]
     fn parses_direct_and_derp_peers() {
         let raw = r#"{
@@ -1409,6 +1435,15 @@ mod tests {
         assert!(gaming.inferred_vram_gb > 10.0);
         let mut state = AppState::boot();
         state.nodes = nodes;
+        let dir = std::env::temp_dir().join(format!("murmuration-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hardware = dir.join("hardware.json");
+        let manifest = dir.join("mesh.json");
+        std::fs::write(&hardware, "{\"nodes\":[]}").unwrap();
+        std::fs::write(&manifest, "{\"nodes\":[]}").unwrap();
+        let _hardware_env = EnvVar::set("MURMURATION_HARDWARE_FILE", &hardware);
+        let _manifest_env = EnvVar::set("MURMURATION_MESH_MANIFEST", &manifest);
+        let _port_env = EnvVar::set("MURMURATION_TELEMETRY_PORT", "9");
         apply_capacity(&mut state, 9.7, 0.0);
         let local = state.nodes.iter().find(|node| node.id == "local").unwrap();
         assert!((local.inferred_vram_gb - 9.7).abs() < 0.05);

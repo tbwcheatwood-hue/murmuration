@@ -23,7 +23,9 @@ The studio is four zones.
 
 Each LM Link row shows whether the device is online, whether it is this computer, and whether it is the preferred device. A row also shows measured VRAM when a GPU probe returns it, or the configured or inferred size when that is what ranking uses. CPU, GPU, and RAM appear on the row after you save them. The search box under Refresh matches the device name, status, role, CPU, GPU, and those sizes. Refresh asks `lms link status` again.
 
-The workbench takes one objective, splits it across roles, and keeps the resulting artifact editable. The traffic tab records the routing decision, time to first token, and whether the reply came from a live LM Studio or from the orchestrator brief.
+The workbench takes one objective, writes a role plan, and keeps the resulting artifact editable. Those role texts are the plan. They are not separate model calls. The traffic tab records the routing decision and time to first token, and each row is labeled Live model, Plan, or Upstream error.
+
+If LM Link has not listed this account, or LM Studio is not accepting connections on `127.0.0.1:1234`, a line under the center tabs says what is missing and shows the gateway URL. When both are up, that line stays hidden.
 
 The command palette is Ctrl+K (Cmd+K on macOS). Ctrl+B toggles the sidebar, Ctrl+J toggles the log dock, and Ctrl+1 through Ctrl+4 switch the center tabs. Ctrl+4 opens FOX.
 
@@ -41,7 +43,7 @@ FOX is the advisor on the fourth center tab. Chat input and chat output are also
 
 Safe, Power, and Vision only change the system prompt. Temperature and the token cap sit on the FOX tab. The nine tool chips name which T.I.M. tools the prompt may mention. Running a tool is still a separate click on the tool card, and the Windows shell, HTTP fetch, and MCP bridge stay off until you approve that run.
 
-A reasoning model can leave the visible `content` field empty and put the reply in `reasoning_content`. Murmuration shows that text as the chat output. A long reply waits up to 180 seconds plus a quarter of the token cap, and never longer than 10 minutes.
+A reasoning model can leave the visible `content` field empty and put the reply in `reasoning_content`. FOX shows that text as the chat output. The gateway does the same for Cursor, Zcode, and any other OpenAI client: empty `content` is filled from the reasoning field, and the original field is kept. A long FOX reply waits up to 180 seconds plus a quarter of the token cap, and never longer than 10 minutes. The gateway allows the same 10 minute ceiling, with 5 seconds to connect, and does not send loopback through a system proxy.
 
 ![FOX tab with chat input, Safe profile, and the tool chips](docs/images/fox-chat.png)
 
@@ -93,12 +95,12 @@ Use the model id `murmuration`. The IDE activity writes that URL for Cursor and 
 | Route | Behavior |
 | --- | --- |
 | `GET /v1/models` | The virtual Murmuration model plus the catalog |
-| `POST /v1/chat/completions` | Routed to a live LM Studio when one is up, otherwise an orchestrator brief |
+| `POST /v1/chat/completions` | Routed to a reachable LM Studio. If that hop fails, the upstream status is returned. A plan is sent only when no node can be reached |
 | `POST /v1/embeddings` | A small local lexical vector, labeled as such |
 | `GET /metrics` | Prometheus text for the swarm |
 | `POST /mcp` | Local tools. Requires the bearer token shown in the inspector |
 
-Chat completions that reach a live LM Studio are proxied. If that hop fails, the gateway logs the failure and answers with the orchestrator brief instead of pretending the peer ran.
+Chat completions that reach a live LM Studio are proxied. The gateway copies reasoning text into `content` when that field is empty, so IDE clients still see the reply. If the hop fails, the gateway returns that upstream error. When a second reachable machine exists, it retries once. A plan is sent only when no LM Studio can be reached. Routing prefers a loaded model that fits the context setting, then the machine with more free VRAM, then a higher observed token rate.
 
 ## How a device gets onto the list
 
@@ -148,15 +150,25 @@ Saved VRAM is the configured size in the ranking above. RAM, CPU, and GPU are la
 
 ## Routing, VRAM, and sharding
 
-Three modes change how a prompt is placed:
+A chat completion goes to a machine that can actually answer. A peer with no address, or with LM Studio not accepting connections, is skipped even when its VRAM number is larger. The choice among reachable machines is:
 
-- **Pipeline** sends the architect, coder, and critic steps to different devices when those roles are healthy.
-- **Shard** computes a layer placement and reserves VRAM for it. Weights are not split across machines until you set an `http` or `https` shard backend, such as a llama.cpp RPC server. The log says when the map is only a plan.
-- **Speculative** prefers a smaller device as the draft and a larger one as the target.
+1. A loaded model whose context window holds the studio context setting.
+2. More free VRAM (measured total minus what is already allocated, otherwise the effective size).
+3. A higher observed token rate, then a lower ping.
+
+If that hop fails to connect, or the machine returns HTTP 502, 503, or 504, the gateway tries the next reachable machine once. Any other upstream status is returned as that status. The orchestrator plan is sent only when no LM Studio can be reached, and the traffic row says Plan.
+
+Mount reserves a model in the studio and the sidebar says reserved. It calls `lms load` only for a real file on this PC, and only when that call is requested. A remote machine, a simulated peer, or a failed start does not mark the model loaded.
+
+Three modes still change the note attached to that choice:
+
+- **Pipeline** is the default. The workbench can still write architect, coder, and critic text, and that text stays a plan.
+- **Shard** computes a layer placement and reserves VRAM for it. Weights are not split across machines until you set an `http` or `https` shard backend, such as a llama.cpp RPC server. Until then the log says the map is only a plan. A reachable LM Studio still answers the chat.
+- **Speculative** labels a second device as the draft. One request is sent.
 
 Before a mount, the fit calculator estimates weight, KV cache, and scratch against the pool. KV size grows with context length and with the cache quant (fp16, q8, or q4). If the pool cannot hold the model, commit is rejected.
 
-A node that is offline, sleeping, or thermally throttled is skipped. The next prompt fails over, and the inspector shows which device was skipped.
+A node that is offline, sleeping, or thermally throttled is left out of the choice. The decision text names the device that was skipped.
 
 ## MCP tools
 
@@ -196,11 +208,13 @@ telemetry_sidecar.py  Zero-dependency GPU metrics server
 mesh.manifest.example.json
 ```
 
-Rust tests cover LM Link filtering, the three VRAM tiers, nvidia-smi path lookup, the metrics JSON shape, synthetic stress without a GPU sample, saving hardware by device name, FOX replies that arrive as reasoning text, the GitHub allowlist for imported workflows, and the Cursor and Zcode config writers. Unrelated settings and other Zcode providers stay.
+Rust tests cover LM Link filtering, the three VRAM tiers, nvidia-smi path lookup, the metrics JSON shape, synthetic stress without a GPU sample, and saving hardware by device name. The hardware test points at a temporary file, so a saved `hardware.json` on the machine running the tests cannot change the result. They also cover FOX and gateway replies that arrive as reasoning text, skipping an unreachable peer, preferring free VRAM and a context window that fits, a remote `lms load` that must not mark the model loaded, the GitHub allowlist for imported workflows, and the Cursor and Zcode config writers. Unrelated settings and other Zcode providers stay.
 
 ```bash
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+GitHub Actions runs that test command and `npm ci` plus `npm run build` on Windows for each push and pull request.
 
 ## What this build does not do
 
@@ -211,3 +225,4 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - FOX does not load a model, and it does not talk to KoboldCpp or a llamafile. LM Studio on port 1234 does the serving.
 - Imported graphs do not replay the original Langflow, Flowise, or n8n runtime. A click turns the export into one topology node, and Run sends that prompt through LM Studio.
 - The IDE buttons write Cursor and Zcode config on this machine. They do not sign you into those apps, and they do not switch the model LM Studio has loaded.
+- A plan in the traffic tab is not a model reply. Live model means the body came from LM Studio. Upstream error means the hop failed and that status was returned.

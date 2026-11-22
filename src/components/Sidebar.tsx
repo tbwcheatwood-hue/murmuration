@@ -161,7 +161,7 @@ function ModelRegistry() {
             </div>
             <div className="mt-1 font-mono text-[10px] text-mute">
               {model.quant} · {gb(model.sizeGb)} GB · {model.paramsB}B · {model.sharded ? `sharded ×${model.shardNodes.length}` : hostName(snapshot.nodes, model.hostNodeId)}
-              {model.loaded ? " · resident" : ""}
+              {model.loaded ? " · reserved" : ""}
             </div>
           </button>
           <div className="mt-2 flex gap-1">

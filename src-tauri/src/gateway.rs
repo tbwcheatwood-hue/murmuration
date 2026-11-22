@@ -59,8 +59,9 @@ pub fn spawn(handle: AppHandle, shared: Shared) {
 
 async fn serve(handle: AppHandle, shared: Shared) {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(180))
-        .connect_timeout(Duration::from_millis(450))
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(600))
         .build()
         .expect("http client");
     let mut bound = None;
@@ -196,20 +197,63 @@ async fn chat(State(ctx): State<Ctx>, Json(body): Json<Value>) -> Response {
     };
     let guard = InflightGuard::new(ctx.shared.clone());
     if let Some(url) = decision.proxy_url.clone() {
-        match forward(&ctx, &body, &decision, &url, &preview, guard).await {
-            Ok(response) => return response,
-            Err(guard) => {
-                write_lock(&ctx.shared).log(
-                    "gateway",
-                    "gateway",
-                    "warn",
-                    format!("Upstream for {} did not answer. Serving an orchestrator brief.", decision.primary_hostname),
-                );
-                return brief(&ctx.shared, &objective, decision, preview, stream, guard);
+        match hop(&ctx, &body, &decision, &url, &preview, stream, guard).await {
+            Hop::Served(response) => return response,
+            Hop::Failed { guard, status, message, retryable } => {
+                if retryable {
+                    if let Some(alt) = decision.alt_proxy_url.clone() {
+                        let alt_host = decision.alt_hostname.clone().unwrap_or_else(|| "backup".into());
+                        write_lock(&ctx.shared).log(
+                            "gateway",
+                            "gateway",
+                            "warn",
+                            format!("{message} Retrying on {alt_host}."),
+                        );
+                        let mut next = decision.clone();
+                        next.primary_hostname = alt_host;
+                        next.proxy_url = Some(alt.clone());
+                        next.reason = format!("Retried on {} after {} failed with {status}. {}", next.primary_hostname, decision.primary_hostname, decision.reason);
+                        return match hop(&ctx, &body, &next, &alt, &preview, stream, guard).await {
+                            Hop::Served(response) => response,
+                            Hop::Failed { guard, status, message, .. } => upstream_failure(&ctx.shared, &next, &preview, status, &message, guard),
+                        };
+                    }
+                }
+                return upstream_failure(&ctx.shared, &decision, &preview, status, &message, guard);
             }
         }
     }
     brief(&ctx.shared, &objective, decision, preview, stream, guard)
+}
+
+enum Hop {
+    Served(Response),
+    Failed { guard: InflightGuard, status: u16, message: String, retryable: bool },
+}
+
+fn upstream_failure(shared: &Shared, decision: &RouteDecision, preview: &str, status: u16, message: &str, guard: InflightGuard) -> Response {
+    let mut logged = decision.clone();
+    logged.upstream = "error".into();
+    record(shared, &logged, preview, message, 0, status);
+    drop(guard);
+    let body = json!({
+        "error": {
+            "message": message,
+            "type": "upstream_error",
+            "code": status
+        },
+        "murmuration": {
+            "node": decision.primary_hostname,
+            "upstream": "error",
+            "reason": decision.reason
+        }
+    });
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-murmuration-upstream", "error")
+        .body(Body::from(body.to_string()))
+        .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 fn brief(
@@ -334,102 +378,210 @@ fn brief_sse(shared: Shared, text: String, decision: RouteDecision, preview: Str
     response
 }
 
-async fn forward(
+async fn hop(
     ctx: &Ctx,
     body: &Value,
     decision: &RouteDecision,
     url: &str,
     preview: &str,
+    stream: bool,
     guard: InflightGuard,
-) -> Result<Response, InflightGuard> {
+) -> Hop {
     let started = Instant::now();
     let sent = match ctx.client.post(url).json(body).send().await {
         Ok(response) => response,
         Err(err) => {
-            write_lock(&ctx.shared).log("gateway", "gateway", "warn", format!("upstream connect failed: {err}"));
-            return Err(guard);
+            return Hop::Failed {
+                guard,
+                status: 502,
+                message: format!("Upstream {} did not answer. {err}", decision.primary_hostname),
+                retryable: true,
+            };
         }
     };
-    if !sent.status().is_success() {
-        let status = sent.status();
-        let text = sent.text().await.unwrap_or_default();
-        write_lock(&ctx.shared).push_traffic(new_traffic(
-            "POST",
-            "/v1/chat/completions",
-            status.as_u16(),
-            started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
-            &decision.primary_hostname,
-            &format!("{} upstream status {status}", decision.reason),
-            preview,
-            &clip(&text, 300),
-            "live",
-        ));
-        return Err(guard);
-    }
     let status = sent.status();
-    let content_type = sent
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("application/json")
-        .to_string();
+    if !status.is_success() {
+        let text = sent.text().await.unwrap_or_default();
+        let retryable = matches!(status.as_u16(), 502 | 503 | 504);
+        return Hop::Failed {
+            guard,
+            status: status.as_u16(),
+            message: format!("{} returned HTTP {status}. {}", decision.primary_hostname, clip(&text, 300)),
+            retryable,
+        };
+    }
+    if stream || sent.headers().get(header::CONTENT_TYPE).and_then(|value| value.to_str().ok()).unwrap_or("").contains("text/event-stream") {
+        return Hop::Served(stream_live(ctx, sent, decision, preview, started, guard));
+    }
+    let bytes = match sent.bytes().await {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return Hop::Failed {
+                guard,
+                status: 502,
+                message: format!("Upstream {} closed before the reply finished. {err}", decision.primary_hostname),
+                retryable: true,
+            };
+        }
+    };
+    let ttft = started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+    let lifted = lift_json_bytes(&bytes);
+    record(&ctx.shared, decision, preview, &clip(&String::from_utf8_lossy(&lifted), 400), ttft, 200);
+    drop(guard);
+    Hop::Served(
+        Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-murmuration-upstream", "live")
+            .body(Body::from(lifted))
+            .unwrap_or_else(|_| Response::new(Body::empty())),
+    )
+}
+
+fn stream_live(ctx: &Ctx, sent: reqwest::Response, decision: &RouteDecision, preview: &str, started: Instant, guard: InflightGuard) -> Response {
+    let status = sent.status();
     let upstream: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>> = Box::pin(sent.bytes_stream());
     struct Proxy {
         upstream: Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>,
+        pending: Vec<u8>,
         recorded: bool,
         started: Instant,
         shared: Shared,
         decision: RouteDecision,
         preview: String,
-        collected: String,
         _guard: InflightGuard,
     }
     let mapped = futures_util::stream::unfold(
         Proxy {
             upstream,
+            pending: Vec::new(),
             recorded: false,
             started,
             shared: ctx.shared.clone(),
             decision: decision.clone(),
             preview: preview.to_string(),
-            collected: String::new(),
             _guard: guard,
         },
         |mut proxy| async move {
-            match proxy.upstream.next().await {
-                Some(Ok(chunk)) => {
-                    if !proxy.recorded {
-                        proxy.recorded = true;
-                        let ttft = proxy.started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
-                        let text = String::from_utf8_lossy(&chunk);
-                        proxy.collected = clip(&text, 400);
-                        record(&proxy.shared, &proxy.decision, &proxy.preview, &proxy.collected, ttft, 200);
+            loop {
+                match proxy.upstream.next().await {
+                    Some(Ok(chunk)) => {
+                        proxy.pending.extend_from_slice(&chunk);
+                        let Some(split) = proxy.pending.iter().rposition(|byte| *byte == b'\n') else {
+                            continue;
+                        };
+                        let ready: Vec<u8> = proxy.pending.drain(..=split).collect();
+                        let text = String::from_utf8_lossy(&ready);
+                        let rewritten = rewrite_sse_block(&text);
+                        if rewritten.is_empty() {
+                            continue;
+                        }
+                        if !proxy.recorded {
+                            proxy.recorded = true;
+                            let ttft = proxy.started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32;
+                            record(&proxy.shared, &proxy.decision, &proxy.preview, &clip(&rewritten, 400), ttft, 200);
+                        }
+                        return Some((Ok::<Bytes, std::io::Error>(Bytes::from(rewritten)), proxy));
                     }
-                    Some((Ok::<Bytes, std::io::Error>(chunk), proxy))
+                    Some(Err(err)) => {
+                        record(
+                            &proxy.shared,
+                            &proxy.decision,
+                            &proxy.preview,
+                            &err.to_string(),
+                            proxy.started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
+                            502,
+                        );
+                        return Some((Err(std::io::Error::other(err.to_string())), proxy));
+                    }
+                    None => {
+                        if proxy.pending.is_empty() {
+                            return None;
+                        }
+                        let rest = String::from_utf8_lossy(&std::mem::take(&mut proxy.pending)).into_owned();
+                        let rewritten = rewrite_sse_block(&rest);
+                        if rewritten.is_empty() {
+                            return None;
+                        }
+                        return Some((Ok(Bytes::from(rewritten)), proxy));
+                    }
                 }
-                Some(Err(err)) => {
-                    record(
-                        &proxy.shared,
-                        &proxy.decision,
-                        &proxy.preview,
-                        &err.to_string(),
-                        proxy.started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
-                        502,
-                    );
-                    Some((Err(std::io::Error::other(err.to_string())), proxy))
-                }
-                None => None,
             }
         },
     );
-    let mut response = Response::builder()
+    Response::builder()
         .status(status)
-        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_TYPE, "text/event-stream")
         .header("x-murmuration-upstream", "live")
         .body(Body::from_stream(mapped))
-        .unwrap_or_else(|_| Response::new(Body::empty()));
-    let _ = response.headers_mut();
-    Ok(response)
+        .unwrap_or_else(|_| Response::new(Body::empty()))
+}
+
+fn lift_json_bytes(bytes: &[u8]) -> Vec<u8> {
+    let Ok(mut value) = serde_json::from_slice::<Value>(bytes) else {
+        return bytes.to_vec();
+    };
+    lift_reasoning(&mut value);
+    serde_json::to_vec(&value).unwrap_or_else(|_| bytes.to_vec())
+}
+
+fn lift_reasoning(value: &mut Value) {
+    let Some(choices) = value.get_mut("choices").and_then(|item| item.as_array_mut()) else {
+        return;
+    };
+    for choice in choices {
+        if let Some(message) = choice.get_mut("message") {
+            lift_text(message);
+        }
+        if let Some(delta) = choice.get_mut("delta") {
+            lift_text(delta);
+        }
+    }
+}
+
+fn lift_text(message: &mut Value) {
+    let content = message.get("content").and_then(|item| item.as_str()).unwrap_or("").trim();
+    if !content.is_empty() {
+        return;
+    }
+    let reasoning = message
+        .get("reasoning_content")
+        .and_then(|item| item.as_str())
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
+        .or_else(|| message.get("reasoning").and_then(|item| item.as_str()).filter(|text| !text.is_empty()).map(str::to_string));
+    let Some(reasoning) = reasoning else {
+        return;
+    };
+    if let Some(object) = message.as_object_mut() {
+        object.insert("content".into(), Value::String(reasoning));
+    }
+}
+
+fn rewrite_sse_block(block: &str) -> String {
+    let mut out = String::new();
+    for line in block.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        let Some(rest) = trimmed.strip_prefix("data:") else {
+            out.push_str(line);
+            continue;
+        };
+        let payload = rest.trim_start();
+        if payload.is_empty() || payload == "[DONE]" {
+            out.push_str(line);
+            continue;
+        }
+        let Ok(mut value) = serde_json::from_str::<Value>(payload) else {
+            out.push_str(line);
+            continue;
+        };
+        lift_reasoning(&mut value);
+        let ending = &line[trimmed.len()..];
+        out.push_str("data: ");
+        out.push_str(&value.to_string());
+        out.push_str(ending);
+    }
+    out
 }
 
 fn record(shared: &Shared, decision: &RouteDecision, preview: &str, response: &str, ttft: u32, status: u16) {
@@ -530,4 +682,35 @@ fn clip(value: &str, max: usize) -> String {
         out.push('…');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reasoning_content_is_copied_into_empty_content() {
+        let mut value = json!({"choices":[{"message":{"role":"assistant","content":"","reasoning_content":"ready"}}]});
+        lift_reasoning(&mut value);
+        assert_eq!(value.pointer("/choices/0/message/content").and_then(|item| item.as_str()), Some("ready"));
+        assert_eq!(value.pointer("/choices/0/message/reasoning_content").and_then(|item| item.as_str()), Some("ready"));
+    }
+
+    #[test]
+    fn existing_content_is_kept() {
+        let mut value = json!({"choices":[{"delta":{"content":"answer","reasoning_content":"think"}}]});
+        lift_reasoning(&mut value);
+        assert_eq!(value.pointer("/choices/0/delta/content").and_then(|item| item.as_str()), Some("answer"));
+    }
+
+    #[test]
+    fn sse_reasoning_delta_gains_content() {
+        let raw = "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"ready\"}}]}\n\n";
+        let out = rewrite_sse_block(raw);
+        assert!(out.contains("\"content\":\"ready\""));
+        assert!(out.contains("reasoning_content"));
+        assert!(!out.contains("[DONE]"));
+        let done = rewrite_sse_block("data: [DONE]\n");
+        assert!(done.contains("[DONE]"));
+    }
 }

@@ -13,10 +13,29 @@ const tabs: { id: WorkspaceTab; label: string; key: string }[] = [
   { id: "chat", label: "FOX", key: "4" },
 ];
 
+function SetupBar() {
+  const snapshot = useSwarm((state) => state.snapshot);
+  const local = snapshot.nodes.find((node) => node.id === "local");
+  const linkDown = snapshot.linkStatus === "unavailable" || snapshot.linkStatus === "pending" || snapshot.nodes.length === 0;
+  const studioDown = !local?.upstreamAlive;
+  if (!linkDown && !studioDown) return null;
+  return (
+    <div className="shrink-0 border-b border-line bg-panel px-3 py-2 text-[12px] leading-5 text-mute">
+      {linkDown && <p>{snapshot.linkMessage || "LM Link has not listed this account yet. On this PC, run lms link status."}</p>}
+      {studioDown && (
+        <p>
+          LM Studio is not accepting connections on 127.0.0.1:1234. Load a model there. This gateway is http://127.0.0.1:{snapshot.gatewayPort}/v1 and the model id is murmuration.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function CenterCanvas() {
   const tab = useSwarm((state) => state.tab);
   return (
     <section className="flex min-w-0 flex-1 flex-col bg-canvas">
+      <SetupBar />
       <div className="flex h-9 shrink-0 items-end gap-1 border-b border-line px-2">
         {tabs.map((item) => (
           <button

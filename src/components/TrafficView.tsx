@@ -2,6 +2,18 @@ import { useState } from "react";
 import { useSwarm } from "../store";
 import { cx } from "../lib/format";
 
+function upstreamLabel(value: string) {
+  if (value === "live") return "Live model";
+  if (value === "brief") return "Plan";
+  return "Upstream error";
+}
+
+function upstreamSentence(value: string) {
+  if (value === "live") return "Live model reply";
+  if (value === "brief") return "Orchestrator plan, not a model reply";
+  return "Upstream error, not a model reply";
+}
+
 export function TrafficView() {
   const traffic = useSwarm((state) => state.snapshot.traffic);
   const port = useSwarm((state) => state.snapshot.gatewayPort);
@@ -21,7 +33,8 @@ export function TrafficView() {
           >
             <span className="text-accent">{entry.method}</span>
             <span className="truncate text-mute">{entry.path}</span>
-            <span className={cx("ml-auto", entry.status < 400 ? "text-mint" : "text-danger")}>{entry.status}</span>
+            <span className="ml-auto text-faint">{upstreamLabel(entry.upstream)}</span>
+            <span className={cx(entry.status < 400 ? "text-mint" : "text-danger")}>{entry.status}</span>
             <span className="w-14 text-right text-faint">{entry.ttftMs} ms</span>
           </button>
         ))}
@@ -29,7 +42,7 @@ export function TrafficView() {
       {current ? (
         <div className="min-h-0 overflow-auto px-4 py-3">
           <div className="font-mono text-[11px] text-mute">
-            {current.ts} · {current.routedTo} · {current.upstream} · TTFT {current.ttftMs} ms
+            {current.ts} · {current.routedTo} · {upstreamSentence(current.upstream)} · TTFT {current.ttftMs} ms
           </div>
           <h3 className="mt-3 text-[11px] uppercase tracking-[0.14em] text-faint">Decision</h3>
           <p className="mt-1 text-[13px] leading-relaxed">{current.decision}</p>
